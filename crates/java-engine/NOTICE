@@ -32,8 +32,20 @@ next declaration. The function is Apache-2.0 under its file header.
 
 https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/parser/StatementParser.kt
 
-The rest of the lexer and parser is an original subset. It is not a
-translation of `JavaParser.kt` or the Pratt expression engine, and it does
-not include IntelliJ platform services (PSI, VirtualFile, ProgressManager,
-indexes, or the compiler). No files from IntelliJ `java/java-tests/testData`
-are copied. Fixtures under `tests/fixtures/` were written for this crate.
+`Project` name binding is an original index over this parser's trees. One
+rule comes from `ResolveClassUtil.resolveClass` in the same tree: the walk's
+result is a class only when the processor returned exactly one candidate.
+More than one candidate stays ambiguous here, and zero stays unresolved.
+`ClassResolverProcessor` itself is not translated.
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-psi-impl/src/com/intellij/psi/impl/source/resolve/ResolveClassUtil.java
+
+That file states: "Copyright 2000-2024 JetBrains s.r.o. and contributors.
+Use of this source code is governed by the Apache 2.0 license."
+
+The rest of the lexer, parser, and binder is an original subset. It is not a
+translation of `JavaParser.kt`, the Pratt expression engine, or IntelliJ's
+scope processor. It does not include IntelliJ platform services (PSI,
+VirtualFile, ProgressManager, stub indexes, or the compiler). No files from
+IntelliJ `java/java-tests/testData` are copied. Fixtures under `tests/fixtures/`
+and the sources in `tests/bind.rs` were written for this crate.

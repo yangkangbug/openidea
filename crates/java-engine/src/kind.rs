@@ -156,6 +156,8 @@ pub enum SyntaxKind {
     Block,
     Initializer,
     LocalVar,
+    /// A variable declared in `try (...)`.
+    Resource,
     EmptyStmt,
     IfStmt,
     WhileStmt,

@@ -149,6 +149,49 @@ fn an_edit_across_two_methods_reparses_the_enclosing_body() {
 }
 
 #[test]
+fn try_with_resources_is_a_resource_and_an_edit_matches_a_full_parse() {
+    let source = "class C { void a() { try (java.io.Reader in = null; AutoCloseable out = null) { int n = 1; } catch (Exception e) { int m = 2; } finally { int k = 3; } } void b() { int m = 2; } }";
+    let file = parse(source);
+    assert!(file.errors().is_empty(), "{}\n{:#?}", file.dump(), file.errors());
+    assert!(file.dump().contains("Resource"), "{}", file.dump());
+    assert_eq!(file.dump().matches("Resource").count(), 2, "{}", file.dump());
+    let sibling = Arc::clone(methods(&file)[1]);
+    let n = source.find("int n = 1").unwrap() as u32 + "int n = ".len() as u32;
+    let edited = assert_edit(&file, TextEdit { start_byte: n, end_byte: n + 1, insert: "9".into() });
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+    assert!(Arc::ptr_eq(&sibling, methods(&edited.file)[1]));
+    let broken = parse("class C { void m() { try (Reader in) { int y = 1; } } }");
+    assert!(!broken.errors().is_empty());
+    assert!(broken.dump().contains("Ident[y]"), "{}", broken.dump());
+}
+
+#[test]
+fn a_qualified_name_keeps_each_identifier() {
+    let file = parse("class C { a.b.Foo value; }");
+    assert!(file.errors().is_empty(), "{}\n{:#?}", file.dump(), file.errors());
+    assert!(file.dump().contains("Ident[a]"), "{}", file.dump());
+    assert!(file.dump().contains("Ident[b]"), "{}", file.dump());
+    assert!(file.dump().contains("Ident[Foo]"), "{}", file.dump());
+}
+
+#[test]
+fn deleting_a_string_quote_matches_a_full_parse() {
+    let with_brace = "class C { void a() { String s = \"{ \"; int n = 1; } void b() { int m = 2; } }";
+    let quote = with_brace.find("\"{").unwrap() as u32;
+    let opened =
+        assert_edit(&parse(with_brace), TextEdit { start_byte: quote, end_byte: quote + 1, insert: String::new() });
+    assert_eq!(opened.mode, UpdateMode::Full, "a brace that leaves a string unbalances the method");
+    let plain = "class C {\n  void a() {\n    String s = \"abc\";\n    int n = 1;\n  }\n  void b() { int m = 2; }\n}\n";
+    let file = parse(plain);
+    let sibling = Arc::clone(methods(&file)[1]);
+    let quote = plain.find("\"abc\"").unwrap() as u32;
+    let edited = assert_edit(&file, TextEdit { start_byte: quote, end_byte: quote + 1, insert: String::new() });
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+    assert!(edited.file.text().contains("abc\";"), "{}", edited.file.text());
+    assert!(Arc::ptr_eq(&sibling, methods(&edited.file)[1]));
+}
+
+#[test]
 fn switch_is_skipped_and_the_next_statement_remains() {
     let file = parse("class C { void m() { switch (x) { case 1: break; } int y = 1; } }");
     assert!(file.errors().iter().any(|error| error.message.contains("switch")));

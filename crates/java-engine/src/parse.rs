@@ -828,19 +828,22 @@ impl<'a> Parser<'a> {
         self.open(SyntaxKind::TryStmt);
         self.bump();
         if self.at(SyntaxKind::LParen) {
-            self.open(SyntaxKind::Error);
-            self.set_message("try-with-resources is not in this subset");
             self.bump();
-            let mut depth = 1i32;
-            while !self.eof() && depth > 0 {
-                match self.kind() {
-                    SyntaxKind::LParen => depth += 1,
-                    SyntaxKind::RParen => depth -= 1,
-                    _ => {}
+            if !self.at(SyntaxKind::RParen) {
+                loop {
+                    self.open(SyntaxKind::Resource);
+                    self.parse_modifier_list();
+                    self.parse_type();
+                    self.expect(SyntaxKind::Ident, "expected name");
+                    self.expect(SyntaxKind::Eq, "expected '='");
+                    self.parse_expr();
+                    self.finish();
+                    if self.at(SyntaxKind::RParen) || !self.eat(SyntaxKind::Semi) {
+                        break;
+                    }
                 }
-                self.bump();
             }
-            self.finish();
+            self.expect(SyntaxKind::RParen, "expected ')'");
         }
         if self.at(SyntaxKind::LBrace) {
             self.parse_block();

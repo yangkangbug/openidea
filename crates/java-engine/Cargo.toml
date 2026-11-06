@@ -1,6 +1,6 @@
 [package]
 name = "java-engine"
-description = "Standalone Rust Java syntax engine: lexer, parser, error recovery, and brace-block reparse. No JVM and no type checker."
+description = "Standalone Rust Java engine: lexer, parser, brace-block reparse, and source-only name binding. No JVM and no class files."
 version = "0.1.37"
 edition = "2024"
 rust-version = "1.96"
