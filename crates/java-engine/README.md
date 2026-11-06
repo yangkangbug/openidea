@@ -4,7 +4,29 @@ Standalone Rust syntax kernel for a subset of Java. It does not start a JVM,
 does not talk to jdtls, and does not resolve names or types.
 
 The OpenIDEA editor still uses jdtls for Java. This crate is not connected to
-the UI or to language-server startup.
+the UI or to language-server startup. Its `Cargo.toml` does not inherit
+OpenIDEA workspace settings, so the directory builds on its own.
+
+## Extracting this directory
+
+This copy stays in OpenIDEA until a separate repository exists. Nothing here
+deletes the crate or closes the OpenIDEA pull request.
+
+When an empty GitHub repository URL is available, the move is:
+
+1. Copy the contents of this directory to that repository's root. The
+   directory root must contain `Cargo.toml`, `LICENSE`, `NOTICE`, `README.md`,
+   `rust-toolchain.toml`, `src/`, `tests/`, and `.github/workflows/ci.yml`.
+2. Do not copy OpenIDEA's root `Cargo.toml`, `Cargo.lock`, or `target/`.
+3. Push that tree to the new repository. The nested workflow starts only
+   after the files sit at the new root. OpenIDEA does not run
+   `crates/java-engine/.github/workflows/ci.yml`.
+4. Leave this OpenIDEA copy in place until that repository's CI is green.
+   Removing it from the OpenIDEA workspace is a later change, not part of
+   the copy.
+
+Set `repository` in `Cargo.toml` only after that URL exists. `publish` stays
+false so this is not sent to crates.io.
 
 ## Goal and what this crate actually does
 

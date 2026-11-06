@@ -1,9 +1,12 @@
 [package]
 name = "java-engine"
 description = "Standalone Rust Java syntax engine: lexer, parser, error recovery, and brace-block reparse. No JVM and no type checker."
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.37"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+authors = ["OpenIDEA contributors"]
+readme = "README.md"
 publish = false
 
 [dependencies]
