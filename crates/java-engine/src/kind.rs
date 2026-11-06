@@ -178,6 +178,16 @@ pub enum SyntaxKind {
     FieldExpr,
     NewExpr,
     ArrayInit,
+    /// A literal, `null`, `true`, or `false`. The value is the token child.
+    LiteralExpr,
+    /// A single name used as an expression. Binding starts here, not at the token.
+    ReferenceExpr,
+    ThisExpr,
+    SuperExpr,
+    /// `(params) -> body` or `name -> body`. Parameters are `Parameter` nodes.
+    LambdaExpr,
+    /// `qualifier :: name` or `qualifier :: new`. The qualifier is an expression or a `Type`.
+    MethodRefExpr,
     ArgList,
     ParamList,
     Error,

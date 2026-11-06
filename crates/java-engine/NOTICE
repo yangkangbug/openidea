@@ -16,9 +16,17 @@ That file header is the license for this derivative, not the separate
 "JetBrains Open-Source Build Terms" document at the root of
 intellij-community (LICENSE.txt there), which governs the IDE product build.
 
-The lexer and parser in this crate are an original subset implementation.
-They are not a translation of `JavaParser.kt` or `PrattExpressionParser.kt`,
-and they do not include IntelliJ platform services (PSI, VirtualFile,
-ProgressManager, indexes, or the compiler). No files from IntelliJ
-`java/java-tests/testData` are copied. Fixtures under `tests/fixtures/`
-were written for this crate.
+`Parser::lambda_decision` follows the commit/rollback rule of
+`PrattExpressionParser.parseLambdaAfterParenth` in the same tree: a
+parenthesized parameter list is a lambda when `->` follows it, and is not
+parsed as one otherwise. That function is Apache-2.0 under the same file
+header. The Rust function is a reimplementation of that decision, not a copy
+of the Pratt parser.
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/parser/PrattExpressionParser.kt
+
+The rest of the lexer and parser is an original subset. It is not a
+translation of `JavaParser.kt` or the Pratt expression engine, and it does
+not include IntelliJ platform services (PSI, VirtualFile, ProgressManager,
+indexes, or the compiler). No files from IntelliJ `java/java-tests/testData`
+are copied. Fixtures under `tests/fixtures/` were written for this crate.

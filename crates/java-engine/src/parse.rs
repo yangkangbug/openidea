@@ -938,7 +938,12 @@ impl<'a> Parser<'a> {
     }
 
     fn can_start_expr(&self) -> bool {
-        can_start_unary(self.kind()) || self.at(SyntaxKind::LBrace)
+        can_start_unary(self.kind()) || self.at(SyntaxKind::LBrace) || self.type_then_colon_colon()
+    }
+
+    fn type_args_then_colon_colon(&self) -> bool {
+        let mut look = Look::from(self);
+        look.scan_args() && look.kind() == SyntaxKind::ColonColon
     }
 
     fn looks_like_cast(&self) -> bool {
@@ -1002,6 +1007,12 @@ impl<'a> Parser<'a> {
             self.bump();
             self.parse_unary();
             self.finish();
+        } else if self.lambda_decision().is_some() {
+            // Same commit point as IntelliJ `parseLambdaAfterParenth`: a parameter
+            // list is a lambda only when `->` follows it. Otherwise `(int) x` stays a cast.
+            self.parse_lambda();
+        } else if self.type_then_colon_colon() {
+            self.parse_type_method_ref();
         } else if self.at(SyntaxKind::LParen) && self.looks_like_cast() {
             // The operand is a unary expression, so postfix binds inside the cast:
             // `(int) x.f` is a cast of `x.f`, not a field access on the cast.
@@ -1017,6 +1028,143 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `Some(true)` is a typed parameter list, `Some(false)` an untyped one.
+    /// Mirrors the lookahead in `PrattExpressionParser.parseLambdaAfterParenth`
+    /// (intellij-community 840d3be11dfdeada533d05052008b48816b6cc4e): `()`,
+    /// `(a, b)`, `(a)`, modifiers or primitives, and a type followed by a name
+    /// are lambdas only when `->` is next. A failed attempt is not parsed.
+    fn lambda_decision(&self) -> Option<bool> {
+        if self.at(SyntaxKind::Ident) && self.nth(1) == SyntaxKind::Arrow {
+            return Some(false);
+        }
+        if !self.at(SyntaxKind::LParen) {
+            return None;
+        }
+        let mut look = Look::from(self);
+        look.bump();
+        let first = look.kind();
+        let mut second_look = look;
+        second_look.bump();
+        let second = second_look.kind();
+        let mut third_look = second_look;
+        third_look.bump();
+        let third = third_look.kind();
+        if first == SyntaxKind::RParen && second == SyntaxKind::Arrow {
+            return Some(false);
+        }
+        if first == SyntaxKind::Ident
+            && (second == SyntaxKind::Comma || (second == SyntaxKind::RParen && third == SyntaxKind::Arrow))
+        {
+            return Some(false);
+        }
+        if first == SyntaxKind::Ident && second == SyntaxKind::Arrow {
+            return None;
+        }
+        let typed_start =
+            first == SyntaxKind::At || first.is_modifier() || look.is_primitive() || first == SyntaxKind::Ident;
+        if typed_start && self.typed_lambda_arrow() {
+            return Some(true);
+        }
+        None
+    }
+
+    fn typed_lambda_arrow(&self) -> bool {
+        let mut look = Look::from(self);
+        if !look.eat(SyntaxKind::LParen) {
+            return false;
+        }
+        if look.kind() == SyntaxKind::RParen {
+            look.bump();
+            return look.kind() == SyntaxKind::Arrow;
+        }
+        loop {
+            look.skip_mods();
+            if !look.scan_type() {
+                return false;
+            }
+            if look.kind() == SyntaxKind::DotDotDot {
+                look.bump();
+            }
+            if look.kind() != SyntaxKind::Ident {
+                return false;
+            }
+            look.bump();
+            if look.eat(SyntaxKind::Comma) && look.kind() != SyntaxKind::RParen {
+                continue;
+            }
+            break;
+        }
+        look.eat(SyntaxKind::RParen) && look.kind() == SyntaxKind::Arrow
+    }
+
+    fn parse_lambda(&mut self) {
+        let typed = self.lambda_decision().unwrap_or(false);
+        self.start(SyntaxKind::LambdaExpr);
+        if self.at(SyntaxKind::Ident) && self.nth(1) == SyntaxKind::Arrow {
+            self.start(SyntaxKind::ParamList);
+            self.start(SyntaxKind::Parameter);
+            self.bump();
+            self.finish();
+            self.finish();
+        } else {
+            self.start(SyntaxKind::ParamList);
+            self.expect(SyntaxKind::LParen, "expected '('");
+            if !self.at(SyntaxKind::RParen) && !self.eof() {
+                loop {
+                    self.start(SyntaxKind::Parameter);
+                    if typed {
+                        self.parse_modifier_list();
+                        self.parse_type();
+                        self.eat(SyntaxKind::DotDotDot);
+                    }
+                    self.expect(SyntaxKind::Ident, "expected parameter name");
+                    self.finish();
+                    if !self.eat(SyntaxKind::Comma) || self.at(SyntaxKind::RParen) {
+                        break;
+                    }
+                }
+            }
+            self.expect(SyntaxKind::RParen, "expected ')'");
+            self.finish();
+        }
+        self.expect(SyntaxKind::Arrow, "expected '->'");
+        if self.at(SyntaxKind::LBrace) {
+            self.parse_block();
+        } else if self.can_start_expr() {
+            self.parse_expr();
+        } else {
+            self.start(SyntaxKind::Error);
+            self.set_message("expected lambda body");
+            self.finish();
+        }
+        self.finish();
+    }
+
+    fn type_then_colon_colon(&self) -> bool {
+        let mut look = Look::from(self);
+        if !(look.is_primitive() || look.kind() == SyntaxKind::Ident) {
+            return false;
+        }
+        look.scan_type() && look.kind() == SyntaxKind::ColonColon
+    }
+
+    fn parse_type_method_ref(&mut self) {
+        self.start(SyntaxKind::MethodRefExpr);
+        self.parse_type();
+        self.finish_method_ref_tail();
+    }
+
+    fn finish_method_ref_tail(&mut self) {
+        self.expect(SyntaxKind::ColonColon, "expected '::'");
+        if self.at(SyntaxKind::Lt) {
+            self.parse_type_args();
+        }
+        if !self.eat(SyntaxKind::Ident) && !self.eat(SyntaxKind::New) {
+            self.expect(SyntaxKind::Ident, "expected name");
+        }
+        self.finish();
+    }
+
     fn parse_primary(&mut self) {
         match self.kind() {
             SyntaxKind::IntLiteral
@@ -1028,10 +1176,10 @@ impl<'a> Parser<'a> {
             | SyntaxKind::TextBlock
             | SyntaxKind::True
             | SyntaxKind::False
-            | SyntaxKind::Null
-            | SyntaxKind::This
-            | SyntaxKind::Super
-            | SyntaxKind::Ident => self.bump(),
+            | SyntaxKind::Null => self.leaf_expr(SyntaxKind::LiteralExpr),
+            SyntaxKind::This => self.leaf_expr(SyntaxKind::ThisExpr),
+            SyntaxKind::Super => self.leaf_expr(SyntaxKind::SuperExpr),
+            SyntaxKind::Ident => self.leaf_expr(SyntaxKind::ReferenceExpr),
             SyntaxKind::LParen => {
                 self.start(SyntaxKind::ParenExpr);
                 self.bump();
@@ -1061,9 +1209,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn leaf_expr(&mut self, kind: SyntaxKind) {
+        self.start(kind);
+        self.bump();
+        self.finish();
+    }
+
     fn parse_postfix(&mut self) {
         loop {
-            if self.at(SyntaxKind::LParen) {
+            if self.at(SyntaxKind::Lt) && self.type_args_then_colon_colon() {
+                let base = self.pop();
+                self.start(SyntaxKind::MethodRefExpr);
+                self.push(base);
+                self.parse_type_args();
+                self.finish_method_ref_tail();
+            } else if self.at(SyntaxKind::ColonColon) {
+                let base = self.pop();
+                self.start(SyntaxKind::MethodRefExpr);
+                self.push(base);
+                self.finish_method_ref_tail();
+            } else if self.at(SyntaxKind::LParen) {
                 let callee = self.pop();
                 self.start(SyntaxKind::CallExpr);
                 self.push(callee);

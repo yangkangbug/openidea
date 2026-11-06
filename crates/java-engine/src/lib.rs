@@ -14,16 +14,15 @@
 //! and expression statements. Types include primitives, names, type arguments,
 //! wildcards, and arrays. Expressions include assignment, `?:`, the JLS
 //! binary operators, `instanceof`, unary and postfix operators, calls, field
-//! access, `new`, casts, and array initializers.
+//! access, `new`, casts, array initializers, lambdas, and method references.
+//! Names, literals, `this`, and `super` are expression nodes, not bare tokens.
 //!
 //! # What it does not do
 //!
-//! Lambdas, method references, `switch`, patterns, modules, `var` in types
-//! beyond a local name, try-with-resources, and explicit type arguments on
-//! calls (`Collections.<String>emptyList()`) are outside this subset. `switch`
-//! and try-with-resources are skipped as error nodes so the following input
-//! can still be parsed. Nothing here is a type checker: a tree does not mean
-//! the program resolves.
+//! `switch`, patterns, modules, try-with-resources, and explicit type arguments
+//! on a call (`Collections.<String>emptyList()`) are outside this subset.
+//! `switch` and try-with-resources are skipped as error nodes so the following
+//! input can still be parsed. Nothing here resolves a name or a type.
 
 mod green;
 mod kind;
@@ -84,20 +83,29 @@ impl ParsedFile {
 
     /// Reparse after replacing `start_byte..end_byte` with `insert`.
     ///
-    /// When the edit sits strictly inside a brace-balanced block or type body
-    /// and that node's new text still has balanced outer braces, only that
-    /// node is parsed again. Otherwise the whole file is parsed again.
-    /// `UpdateMode::Full` is a full parse, not a partial one.
+    /// A block or type body is parsed again only when the edit is strictly
+    /// inside its braces and the new token list still has balanced outer
+    /// braces. Otherwise the whole file is parsed. This path does not parse
+    /// the file a second time to compare trees. [`Self::apply_edit_verified`]
+    /// does that comparison and is what the tests use.
     pub fn apply_edit(&self, edit: TextEdit) -> EditResult {
+        self.edit(edit, false)
+    }
+
+    /// Like [`Self::apply_edit`], then parses the new text from scratch.
+    /// If the fragment tree differs, the full parse is returned with
+    /// [`UpdateMode::Full`]. Default edits do not pay for this check.
+    pub fn apply_edit_verified(&self, edit: TextEdit) -> EditResult {
+        self.edit(edit, true)
+    }
+
+    fn edit(&self, edit: TextEdit, verify: bool) -> EditResult {
         let (text, snapped) = apply_text(&self.text, &edit);
-        if snapped {
-            return EditResult { file: Self::parse(&text), mode: UpdateMode::Full };
-        }
-        if let Some((root, kind)) = reparse_root(&self.root, &self.text, &text, edit.start_byte, edit.end_byte) {
-            // A fragment parse can diverge from a whole-file parse. Discard it
-            // rather than report an incremental tree that is not the same syntax.
+        if !snapped
+            && let Some((root, kind)) = reparse_root(&self.root, &self.text, &text, edit.start_byte, edit.end_byte)
+        {
             let file = Self { text: text.clone(), root };
-            if file.dump() == Self::parse(&text).dump() {
+            if !verify || file.root.as_ref() == Self::parse(&text).root.as_ref() {
                 return EditResult { file, mode: UpdateMode::Incremental { kind } };
             }
         }

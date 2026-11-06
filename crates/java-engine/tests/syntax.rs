@@ -9,6 +9,15 @@ fn child(node: &java_engine::GreenNode, kind: SyntaxKind) -> &Arc<java_engine::G
     node.child_nodes().find(|child| child.kind() == kind).unwrap_or_else(|| panic!("missing {kind:?}"))
 }
 
+fn assert_edit(file: &ParsedFile, edit: TextEdit) -> java_engine::EditResult {
+    let fast = file.apply_edit(edit.clone());
+    let checked = file.apply_edit_verified(edit);
+    assert_eq!(fast.mode, checked.mode, "verified mode disagreed\n{}", fast.file.dump());
+    assert_eq!(fast.file.root().as_ref(), checked.file.root().as_ref());
+    assert_eq!(fast.file.root().as_ref(), parse(fast.file.text()).root().as_ref());
+    fast
+}
+
 fn methods(file: &ParsedFile) -> Vec<&Arc<java_engine::GreenNode>> {
     let class = child(file.root(), SyntaxKind::Class);
     let body = child(class, SyntaxKind::ClassBody);
@@ -119,4 +128,101 @@ fn switch_is_skipped_and_the_next_statement_remains() {
 fn empty_and_comment_only_files_parse() {
     assert!(parse("").errors().is_empty());
     assert!(parse("/* { */\n// }\n").errors().is_empty());
+}
+
+#[test]
+fn lambda_and_method_reference_are_expression_nodes() {
+    let file = parse(
+        r#"
+        class C {
+            void m() {
+                Object a = () -> { int n = 1; };
+                Object b = (int v) -> v + 1;
+                Object c = x -> x;
+                Object d = String::length;
+                Object e = C::new;
+                Object f = List<String>::of;
+                Object g = this::m;
+                Object h = (int) 1;
+            }
+        }
+        "#,
+    );
+    assert!(file.errors().is_empty(), "{}\n{:#?}", file.dump(), file.errors());
+    assert!(file.dump().contains("LambdaExpr"), "{}", file.dump());
+    assert!(file.dump().contains("MethodRefExpr"), "{}", file.dump());
+    assert!(file.dump().contains("ReferenceExpr"), "{}", file.dump());
+    assert!(file.dump().contains("CastExpr"), "{}", file.dump());
+    assert!(file.dump().contains("LiteralExpr"), "{}", file.dump());
+}
+
+#[test]
+fn edits_match_a_full_parse_without_using_it_as_the_default_path() {
+    let source = r#"
+        class C {
+            void a() {
+                String s = "{";
+                String t = """
+                    { brace }
+                    """;
+                int n = 1; // {
+                /* } */
+                Object r = () -> n + 1;
+            }
+            void b() { int m = 2; }
+        }
+        "#;
+    let file = parse(source);
+    assert!(file.errors().is_empty(), "{}\n{:#?}", file.dump(), file.errors());
+    let sibling = Arc::clone(methods(&file)[1]);
+
+    let n = source.find("int n = 1").unwrap() as u32 + "int n = ".len() as u32;
+    let edited = assert_edit(&file, TextEdit { start_byte: n, end_byte: n + 1, insert: "9".into() });
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+    assert!(Arc::ptr_eq(&sibling, methods(&edited.file)[1]));
+
+    let string_brace = edited.file.text().find("\"{\"").unwrap() as u32 + 1;
+    let edited = assert_edit(
+        &edited.file,
+        TextEdit { start_byte: string_brace, end_byte: string_brace + 1, insert: "x".into() },
+    );
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+
+    let block_brace = edited.file.text().find("{ brace }").unwrap() as u32;
+    let edited =
+        assert_edit(&edited.file, TextEdit { start_byte: block_brace, end_byte: block_brace + 1, insert: "(".into() });
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::Block }, "text-block brace changed the mode");
+
+    let comment = edited.file.text().find("// {").unwrap() as u32 + 3;
+    let edited = assert_edit(&edited.file, TextEdit { start_byte: comment, end_byte: comment + 1, insert: "x".into() });
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+    let block_comment = edited.file.text().find("/* } */").unwrap() as u32 + 3;
+    let edited = assert_edit(
+        &edited.file,
+        TextEdit { start_byte: block_comment, end_byte: block_comment + 1, insert: "x".into() },
+    );
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+    assert!(Arc::ptr_eq(&sibling, methods(&edited.file)[1]));
+
+    let broken_at = edited.file.text().find("int n = 9").unwrap() as u32;
+    let broken = assert_edit(
+        &edited.file,
+        TextEdit { start_byte: broken_at, end_byte: broken_at + "int n = 9".len() as u32, insert: "int n = ".into() },
+    );
+    assert_eq!(broken.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+    assert!(!broken.file.errors().is_empty());
+    let hole = broken.file.text().find("int n = ").unwrap() as u32 + "int n = ".len() as u32;
+    let restored = assert_edit(&broken.file, TextEdit { start_byte: hole, end_byte: hole, insert: "9".into() });
+    assert_eq!(restored.mode, UpdateMode::Incremental { kind: SyntaxKind::Block });
+    assert!(restored.file.errors().is_empty(), "{:#?}", restored.file.errors());
+
+    let class_name = restored.file.text().find("class C").unwrap() as u32 + "class ".len() as u32;
+    let renamed =
+        assert_edit(&restored.file, TextEdit { start_byte: class_name, end_byte: class_name + 1, insert: "D".into() });
+    assert_eq!(renamed.mode, UpdateMode::Full, "a name outside every body must reparse the file");
+
+    let opener = renamed.file.text().find("void a() {").unwrap() as u32 + "void a() ".len() as u32;
+    let opened = assert_edit(&renamed.file, TextEdit { start_byte: opener, end_byte: opener + 1, insert: "(".into() });
+    assert_eq!(opened.mode, UpdateMode::Full);
+    assert!(!opened.file.errors().is_empty());
 }
