@@ -1,0 +1,9 @@
+[package]
+name = "java-engine"
+description = "Standalone Rust Java syntax engine: lexer, parser, error recovery, and brace-block reparse. No JVM and no type checker."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

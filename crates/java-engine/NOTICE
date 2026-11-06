@@ -1,0 +1,24 @@
+This crate is Apache-2.0, the same license as the OpenIDEA repository
+(see the repository root LICENSE).
+
+The function `balanced_brace_block` in `src/reparse.rs` is a Rust
+reimplementation of `SyntaxBuilderUtil.checkBraceBalance` /
+`hasProperBraceBalance`, called by `JavaCodeBlockParser.canBeReparsedIncrementally`
+in JetBrains intellij-community at commit
+840d3be11dfdeada533d05052008b48816b6cc4e:
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/platform/syntax/syntax-util/src/com/intellij/platform/syntax/util/parser/SyntaxBuilderUtil.kt
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/element/lazyParser/JavaCodeBlockParser.kt
+
+Those two files state: "Copyright 2000-2025 JetBrains s.r.o. and contributors.
+Use of this source code is governed by the Apache 2.0 license."
+That file header is the license for this derivative, not the separate
+"JetBrains Open-Source Build Terms" document at the root of
+intellij-community (LICENSE.txt there), which governs the IDE product build.
+
+The lexer and parser in this crate are an original subset implementation.
+They are not a translation of `JavaParser.kt` or `PrattExpressionParser.kt`,
+and they do not include IntelliJ platform services (PSI, VirtualFile,
+ProgressManager, indexes, or the compiler). No files from IntelliJ
+`java/java-tests/testData` are copied. Fixtures under `tests/fixtures/`
+were written for this crate.
