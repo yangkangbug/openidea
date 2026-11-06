@@ -12,6 +12,7 @@ fn child(node: &java_engine::GreenNode, kind: SyntaxKind) -> &Arc<java_engine::G
 fn assert_edit(file: &ParsedFile, edit: TextEdit) -> java_engine::EditResult {
     let fast = file.apply_edit(edit.clone());
     let checked = file.apply_edit_verified(edit);
+    assert!(fast.file.tokens_cover_text(), "edited tree is not lossless\n{}", fast.file.dump());
     assert_eq!(fast.mode, checked.mode, "verified mode disagreed\n{}", fast.file.dump());
     assert_eq!(fast.file.root().as_ref(), checked.file.root().as_ref());
     assert_eq!(fast.file.root().as_ref(), parse(fast.file.text()).root().as_ref());
@@ -28,6 +29,7 @@ fn methods(file: &ParsedFile) -> Vec<&Arc<java_engine::GreenNode>> {
 fn valid_fixture_parses_without_errors() {
     let text = include_str!("fixtures/valid.java");
     let file = parse(text);
+    assert!(file.tokens_cover_text());
     assert!(file.errors().is_empty(), "{}\n{:#?}", file.dump(), file.errors());
     assert_eq!(file.dump(), parse(text).dump());
     assert!(file.dump().contains("Class"));
@@ -115,6 +117,35 @@ fn utf16_emoji_edit_matches_a_full_parse() {
     assert!(
         file.apply_utf16_edit(Utf16Edit { start_utf16: utf16 + 1, end_utf16: utf16 + 2, insert: "x".into() }).is_err()
     );
+}
+
+#[test]
+fn garbage_tokens_do_not_swallow_the_next_declaration() {
+    let file = parse("class C { void m() { ??? int y = 1; else z; int w = 2; } }");
+    assert!(file.tokens_cover_text());
+    assert!(file.dump().contains("LocalVar"), "{}", file.dump());
+    assert!(file.dump().contains("Ident[y]"), "{}", file.dump());
+    assert!(file.dump().contains("Ident[w]"), "{}", file.dump());
+    assert!(file.errors().iter().any(|error| error.message == "unexpected token"));
+    assert!(file.errors().iter().any(|error| error.message == "else without if"));
+    let literal = file.node_ranges().into_iter().find(|range| {
+        let slice = &file.text()[range.start_byte as usize..range.end_byte as usize];
+        range.kind == SyntaxKind::LiteralExpr && slice == "1"
+    });
+    let literal = literal.expect("literal 1");
+    assert_eq!(&file.text()[literal.start_byte as usize..literal.end_byte as usize], "1");
+}
+
+#[test]
+fn an_edit_across_two_methods_reparses_the_enclosing_body() {
+    let source = "class C { void a() { int n = 1; } void b() { int m = 2; } }";
+    let file = parse(source);
+    let start = source.find('1').unwrap() as u32;
+    let end = source.find('2').unwrap() as u32 + 1;
+    let edited =
+        assert_edit(&file, TextEdit { start_byte: start, end_byte: end, insert: "9; } void b() { int m = 8".into() });
+    assert_eq!(edited.mode, UpdateMode::Incremental { kind: SyntaxKind::ClassBody });
+    assert_eq!(edited.file.text(), "class C { void a() { int n = 9; } void b() { int m = 8; } }");
 }
 
 #[test]

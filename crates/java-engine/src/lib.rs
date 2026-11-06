@@ -81,6 +81,20 @@ impl ParsedFile {
         utf16_to_byte(&self.text, utf16)
     }
 
+    /// Byte range of every node. Offsets match `text()` only when each token's
+    /// stored lexeme is the slice of `text()` at that offset.
+    pub fn node_ranges(&self) -> Vec<NodeRange> {
+        let mut out = Vec::new();
+        collect_ranges(self.root(), 0, &mut out);
+        out
+    }
+
+    /// Every token's lexeme is exactly the source slice at the offset produced
+    /// by walking the tree. This is the lossless-range check.
+    pub fn tokens_cover_text(&self) -> bool {
+        tokens_cover(self.root(), self.text(), 0) && self.root.utf8_len() as usize == self.text.len()
+    }
+
     /// Reparse after replacing `start_byte..end_byte` with `insert`.
     ///
     /// A block or type body is parsed again only when the edit is strictly
@@ -120,6 +134,48 @@ impl ParsedFile {
         }
         Ok(self.apply_edit(TextEdit { start_byte: start, end_byte: end, insert: edit.insert }))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeRange {
+    pub kind: SyntaxKind,
+    pub start_byte: u32,
+    pub end_byte: u32,
+}
+
+fn collect_ranges(node: &GreenNode, start: u32, out: &mut Vec<NodeRange>) {
+    out.push(NodeRange { kind: node.kind(), start_byte: start, end_byte: start + node.utf8_len() });
+    let mut offset = start;
+    for child in node.children() {
+        if let Some(child) = child.as_node() {
+            collect_ranges(child, offset, out);
+        }
+        offset += child.utf8_len();
+    }
+}
+
+fn tokens_cover(node: &GreenNode, text: &str, start: u32) -> bool {
+    let mut offset = start;
+    for child in node.children() {
+        match child {
+            GreenElement::Token(token) => {
+                let end = offset + token.utf8_len();
+                let Some(slice) = text.get(offset as usize..end as usize) else {
+                    return false;
+                };
+                if slice != token.text() {
+                    return false;
+                }
+            }
+            GreenElement::Node(child) => {
+                if !tokens_cover(child, text, offset) {
+                    return false;
+                }
+            }
+        }
+        offset += child.utf8_len();
+    }
+    offset == start + node.utf8_len()
 }
 
 /// UTF-8 range replacement. Offsets are bytes, not UTF-16 code units.

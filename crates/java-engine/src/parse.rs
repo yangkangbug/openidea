@@ -64,6 +64,15 @@ impl<'a> Parser<'a> {
         self.stack.push(Frame { kind, children: Vec::new(), message: None });
     }
 
+    /// Open a node that begins at the next token. Leading trivia stays on the parent,
+    /// so the node's byte range is the construct itself, not the whitespace before it.
+    fn open(&mut self, kind: SyntaxKind) {
+        if !self.stack.is_empty() {
+            self.drain();
+        }
+        self.start(kind);
+    }
+
     fn finish(&mut self) -> Arc<GreenNode> {
         let frame = self.stack.pop().expect("finish");
         let node = GreenNode::from_parts(frame.kind, frame.children, frame.message);
@@ -136,7 +145,7 @@ impl<'a> Parser<'a> {
 
     fn expect(&mut self, kind: SyntaxKind, message: &'static str) {
         if !self.eat(kind) {
-            self.start(SyntaxKind::Error);
+            self.open(SyntaxKind::Error);
             self.set_message(message);
             self.finish();
         }
@@ -181,7 +190,7 @@ impl<'a> Parser<'a> {
     }
 
     fn error_one(&mut self, message: &'static str) {
-        self.start(SyntaxKind::Error);
+        self.open(SyntaxKind::Error);
         self.set_message(message);
         if !self.eof() {
             self.bump();
@@ -193,7 +202,7 @@ impl<'a> Parser<'a> {
         if !self.at(SyntaxKind::Package) {
             return;
         }
-        self.start(SyntaxKind::PackageDecl);
+        self.open(SyntaxKind::PackageDecl);
         self.bump();
         self.parse_qualified_name(false);
         self.expect(SyntaxKind::Semi, "expected ';'");
@@ -201,7 +210,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_import(&mut self) {
-        self.start(SyntaxKind::ImportDecl);
+        self.open(SyntaxKind::ImportDecl);
         self.bump();
         self.eat(SyntaxKind::Static);
         self.parse_qualified_name(true);
@@ -210,7 +219,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_qualified_name(&mut self, allow_star: bool) {
-        self.start(SyntaxKind::Name);
+        self.open(SyntaxKind::Name);
         self.expect(SyntaxKind::Ident, "expected name");
         while self.eat(SyntaxKind::Dot) {
             if allow_star && self.eat(SyntaxKind::Star) {
@@ -266,7 +275,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_enum(&mut self) {
-        self.start(SyntaxKind::Enum);
+        self.open(SyntaxKind::Enum);
         self.parse_modifier_list();
         self.bump();
         self.expect(SyntaxKind::Ident, "expected name");
@@ -281,7 +290,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_record(&mut self) {
-        self.start(SyntaxKind::Record);
+        self.open(SyntaxKind::Record);
         self.parse_modifier_list();
         self.bump();
         self.expect(SyntaxKind::Ident, "expected name");
@@ -304,10 +313,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_params(&mut self) {
-        self.start(SyntaxKind::TypeParamList);
+        self.open(SyntaxKind::TypeParamList);
         self.expect(SyntaxKind::Lt, "expected '<'");
         loop {
-            self.start(SyntaxKind::TypeParam);
+            self.open(SyntaxKind::TypeParam);
             self.expect(SyntaxKind::Ident, "expected type parameter");
             if self.eat(SyntaxKind::Extends) {
                 self.parse_type();
@@ -344,7 +353,7 @@ impl<'a> Parser<'a> {
 
     fn parse_enum_body(&mut self) -> Arc<GreenNode> {
         self.drain();
-        self.start(SyntaxKind::EnumBody);
+        self.open(SyntaxKind::EnumBody);
         self.expect(SyntaxKind::LBrace, "expected '{'");
         while !self.eof() && !self.at(SyntaxKind::RBrace) {
             if self.at(SyntaxKind::Semi) {
@@ -379,7 +388,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_enum_constant(&mut self) {
-        self.start(SyntaxKind::EnumConstant);
+        self.open(SyntaxKind::EnumConstant);
         while self.at(SyntaxKind::At) {
             self.parse_annotation();
         }
@@ -438,14 +447,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_initializer(&mut self) {
-        self.start(SyntaxKind::Initializer);
+        self.open(SyntaxKind::Initializer);
         self.parse_modifier_list();
         self.parse_block();
         self.finish();
     }
 
     fn parse_constructor(&mut self) {
-        self.start(SyntaxKind::Constructor);
+        self.open(SyntaxKind::Constructor);
         self.parse_modifier_list();
         if self.at(SyntaxKind::Lt) {
             self.parse_type_params();
@@ -464,7 +473,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_method(&mut self) {
-        self.start(SyntaxKind::Method);
+        self.open(SyntaxKind::Method);
         self.parse_modifier_list();
         if self.at(SyntaxKind::Lt) {
             self.parse_type_params();
@@ -484,7 +493,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_field(&mut self) {
-        self.start(SyntaxKind::Field);
+        self.open(SyntaxKind::Field);
         self.parse_modifier_list();
         self.parse_type();
         self.parse_declarators();
@@ -509,7 +518,7 @@ impl<'a> Parser<'a> {
         if !self.has_modifier() {
             return;
         }
-        self.start(SyntaxKind::ModifierList);
+        self.open(SyntaxKind::ModifierList);
         while self.at(SyntaxKind::At) || self.kind().is_modifier() {
             if self.at(SyntaxKind::At) {
                 self.parse_annotation();
@@ -525,7 +534,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_annotation(&mut self) {
-        self.start(SyntaxKind::Annotation);
+        self.open(SyntaxKind::Annotation);
         self.expect(SyntaxKind::At, "expected '@'");
         self.parse_qualified_name(false);
         if self.eat(SyntaxKind::LParen) {
@@ -575,7 +584,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_params(&mut self) {
-        self.start(SyntaxKind::ParamList);
+        self.open(SyntaxKind::ParamList);
         self.expect(SyntaxKind::LParen, "expected '('");
         if !self.at(SyntaxKind::RParen) && !self.eof() {
             loop {
@@ -590,7 +599,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_param(&mut self) {
-        self.start(SyntaxKind::Parameter);
+        self.open(SyntaxKind::Parameter);
         self.parse_modifier_list();
         self.parse_type();
         self.eat(SyntaxKind::DotDotDot);
@@ -599,7 +608,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) {
-        self.start(SyntaxKind::Type);
+        self.open(SyntaxKind::Type);
         while self.at(SyntaxKind::At) {
             self.parse_annotation();
         }
@@ -620,7 +629,7 @@ impl<'a> Parser<'a> {
         if allow_primitive && self.eat_primitive() {
             return;
         }
-        self.start(SyntaxKind::Name);
+        self.open(SyntaxKind::Name);
         self.expect(SyntaxKind::Ident, "expected type name");
         if self.at(SyntaxKind::Lt) {
             self.parse_type_args();
@@ -653,7 +662,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_args(&mut self) {
-        self.start(SyntaxKind::TypeArgList);
+        self.open(SyntaxKind::TypeArgList);
         self.expect(SyntaxKind::Lt, "expected '<'");
         if !self.closes_args() {
             loop {
@@ -676,7 +685,7 @@ impl<'a> Parser<'a> {
 
     fn parse_block(&mut self) -> Arc<GreenNode> {
         self.drain();
-        self.start(SyntaxKind::Block);
+        self.open(SyntaxKind::Block);
         self.expect(SyntaxKind::LBrace, "expected '{'");
         self.parse_stmts();
         self.expect(SyntaxKind::RBrace, "expected '}'");
@@ -696,7 +705,7 @@ impl<'a> Parser<'a> {
     fn parse_stmt(&mut self) {
         match self.kind() {
             SyntaxKind::Semi => {
-                self.start(SyntaxKind::EmptyStmt);
+                self.open(SyntaxKind::EmptyStmt);
                 self.bump();
                 self.finish();
             }
@@ -716,7 +725,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::Switch => self.recover_switch(),
             _ if self.looks_like_decl() => self.parse_local(true),
             _ if self.can_start_expr() => {
-                self.start(SyntaxKind::ExprStmt);
+                self.open(SyntaxKind::ExprStmt);
                 self.parse_expr();
                 self.expect(SyntaxKind::Semi, "expected ';'");
                 self.finish();
@@ -726,7 +735,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_if(&mut self) {
-        self.start(SyntaxKind::IfStmt);
+        self.open(SyntaxKind::IfStmt);
         self.bump();
         self.expect(SyntaxKind::LParen, "expected '('");
         self.parse_expr();
@@ -739,7 +748,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_while(&mut self) {
-        self.start(SyntaxKind::WhileStmt);
+        self.open(SyntaxKind::WhileStmt);
         self.bump();
         self.expect(SyntaxKind::LParen, "expected '('");
         self.parse_expr();
@@ -749,7 +758,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_do(&mut self) {
-        self.start(SyntaxKind::DoStmt);
+        self.open(SyntaxKind::DoStmt);
         self.bump();
         self.parse_stmt();
         self.expect(SyntaxKind::While, "expected 'while'");
@@ -761,7 +770,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_for(&mut self) {
-        self.start(SyntaxKind::ForStmt);
+        self.open(SyntaxKind::ForStmt);
         self.bump();
         self.expect(SyntaxKind::LParen, "expected '('");
         if !self.at(SyntaxKind::Semi) && !self.at(SyntaxKind::RParen) {
@@ -805,7 +814,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assert(&mut self) {
-        self.start(SyntaxKind::AssertStmt);
+        self.open(SyntaxKind::AssertStmt);
         self.bump();
         self.parse_expr();
         if self.eat(SyntaxKind::Colon) {
@@ -816,10 +825,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_try(&mut self) {
-        self.start(SyntaxKind::TryStmt);
+        self.open(SyntaxKind::TryStmt);
         self.bump();
         if self.at(SyntaxKind::LParen) {
-            self.start(SyntaxKind::Error);
+            self.open(SyntaxKind::Error);
             self.set_message("try-with-resources is not in this subset");
             self.bump();
             let mut depth = 1i32;
@@ -837,7 +846,7 @@ impl<'a> Parser<'a> {
             self.parse_block();
         }
         while self.at(SyntaxKind::Catch) {
-            self.start(SyntaxKind::CatchClause);
+            self.open(SyntaxKind::CatchClause);
             self.bump();
             self.expect(SyntaxKind::LParen, "expected '('");
             self.parse_type();
@@ -856,7 +865,7 @@ impl<'a> Parser<'a> {
     }
 
     fn recover_switch(&mut self) {
-        self.start(SyntaxKind::Error);
+        self.open(SyntaxKind::Error);
         self.set_message("switch is not parsed in this subset");
         self.bump();
         let mut depth = 0i32;
@@ -888,24 +897,26 @@ impl<'a> Parser<'a> {
         self.finish();
     }
 
+    /// One unexpected token, then the next statement can parse.
+    /// Same shape as `StatementParser.parseStatements`: a non-statement consumes
+    /// a single token instead of skipping through the following declaration.
     fn recover_stmt(&mut self) {
-        self.start(SyntaxKind::Error);
-        self.set_message("expected statement");
-        while !self.eof() {
-            let kind = self.kind();
-            if kind == SyntaxKind::RBrace || kind == SyntaxKind::LBrace || is_stmt_keyword(kind) {
-                break;
-            }
+        let kind = self.kind();
+        self.open(SyntaxKind::Error);
+        self.set_message(match kind {
+            SyntaxKind::Else => "else without if",
+            SyntaxKind::Catch => "catch without try",
+            SyntaxKind::Finally => "finally without try",
+            _ => "unexpected token",
+        });
+        if !self.eof() && kind != SyntaxKind::RBrace {
             self.bump();
-            if kind == SyntaxKind::Semi {
-                break;
-            }
         }
         self.finish();
     }
 
     fn parse_local(&mut self, semi: bool) {
-        self.start(SyntaxKind::LocalVar);
+        self.open(SyntaxKind::LocalVar);
         self.parse_modifier_list();
         if self.eat(SyntaxKind::Var) {
             self.expect(SyntaxKind::Ident, "expected name");
@@ -1003,7 +1014,7 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::Bang
                 | SyntaxKind::Tilde
         ) {
-            self.start(SyntaxKind::UnaryExpr);
+            self.open(SyntaxKind::UnaryExpr);
             self.bump();
             self.parse_unary();
             self.finish();
@@ -1016,7 +1027,7 @@ impl<'a> Parser<'a> {
         } else if self.at(SyntaxKind::LParen) && self.looks_like_cast() {
             // The operand is a unary expression, so postfix binds inside the cast:
             // `(int) x.f` is a cast of `x.f`, not a field access on the cast.
-            self.start(SyntaxKind::CastExpr);
+            self.open(SyntaxKind::CastExpr);
             self.bump();
             self.parse_type();
             self.expect(SyntaxKind::RParen, "expected ')'");
@@ -1099,19 +1110,19 @@ impl<'a> Parser<'a> {
 
     fn parse_lambda(&mut self) {
         let typed = self.lambda_decision().unwrap_or(false);
-        self.start(SyntaxKind::LambdaExpr);
+        self.open(SyntaxKind::LambdaExpr);
         if self.at(SyntaxKind::Ident) && self.nth(1) == SyntaxKind::Arrow {
-            self.start(SyntaxKind::ParamList);
-            self.start(SyntaxKind::Parameter);
+            self.open(SyntaxKind::ParamList);
+            self.open(SyntaxKind::Parameter);
             self.bump();
             self.finish();
             self.finish();
         } else {
-            self.start(SyntaxKind::ParamList);
+            self.open(SyntaxKind::ParamList);
             self.expect(SyntaxKind::LParen, "expected '('");
             if !self.at(SyntaxKind::RParen) && !self.eof() {
                 loop {
-                    self.start(SyntaxKind::Parameter);
+                    self.open(SyntaxKind::Parameter);
                     if typed {
                         self.parse_modifier_list();
                         self.parse_type();
@@ -1133,7 +1144,7 @@ impl<'a> Parser<'a> {
         } else if self.can_start_expr() {
             self.parse_expr();
         } else {
-            self.start(SyntaxKind::Error);
+            self.open(SyntaxKind::Error);
             self.set_message("expected lambda body");
             self.finish();
         }
@@ -1149,7 +1160,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_method_ref(&mut self) {
-        self.start(SyntaxKind::MethodRefExpr);
+        self.open(SyntaxKind::MethodRefExpr);
         self.parse_type();
         self.finish_method_ref_tail();
     }
@@ -1181,7 +1192,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::Super => self.leaf_expr(SyntaxKind::SuperExpr),
             SyntaxKind::Ident => self.leaf_expr(SyntaxKind::ReferenceExpr),
             SyntaxKind::LParen => {
-                self.start(SyntaxKind::ParenExpr);
+                self.open(SyntaxKind::ParenExpr);
                 self.bump();
                 self.parse_expr();
                 self.expect(SyntaxKind::RParen, "expected ')'");
@@ -1190,7 +1201,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::New => self.parse_new(),
             SyntaxKind::LBrace => self.parse_array_init(),
             _ => {
-                self.start(SyntaxKind::Error);
+                self.open(SyntaxKind::Error);
                 self.set_message("expected expression");
                 if !self.eof()
                     && !matches!(
@@ -1210,7 +1221,7 @@ impl<'a> Parser<'a> {
     }
 
     fn leaf_expr(&mut self, kind: SyntaxKind) {
-        self.start(kind);
+        self.open(kind);
         self.bump();
         self.finish();
     }
@@ -1270,7 +1281,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_new(&mut self) {
-        self.start(SyntaxKind::NewExpr);
+        self.open(SyntaxKind::NewExpr);
         self.bump();
         self.parse_creator_type();
         if self.at(SyntaxKind::LParen) {
@@ -1298,7 +1309,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_creator_type(&mut self) {
-        self.start(SyntaxKind::Type);
+        self.open(SyntaxKind::Type);
         while self.at(SyntaxKind::At) {
             self.parse_annotation();
         }
@@ -1309,7 +1320,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array_init(&mut self) {
-        self.start(SyntaxKind::ArrayInit);
+        self.open(SyntaxKind::ArrayInit);
         self.expect(SyntaxKind::LBrace, "expected '{'");
         if !self.at(SyntaxKind::RBrace) {
             loop {
@@ -1328,7 +1339,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_args(&mut self) {
-        self.start(SyntaxKind::ArgList);
+        self.open(SyntaxKind::ArgList);
         self.expect(SyntaxKind::LParen, "expected '('");
         if !self.at(SyntaxKind::RParen) && !self.eof() {
             loop {
@@ -1350,23 +1361,6 @@ enum MemberShape {
     Constructor,
     Method,
     Field,
-}
-
-fn is_stmt_keyword(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::If
-            | SyntaxKind::While
-            | SyntaxKind::Do
-            | SyntaxKind::For
-            | SyntaxKind::Return
-            | SyntaxKind::Throw
-            | SyntaxKind::Break
-            | SyntaxKind::Continue
-            | SyntaxKind::Assert
-            | SyntaxKind::Try
-            | SyntaxKind::Switch
-    )
 }
 
 fn can_start_unary(kind: SyntaxKind) -> bool {

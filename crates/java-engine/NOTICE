@@ -25,6 +25,13 @@ of the Pratt parser.
 
 https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/parser/PrattExpressionParser.kt
 
+`Parser::recover_stmt` follows `StatementParser.parseStatements` in the same
+tree: when the current token does not start a statement, one token becomes an
+error and parsing continues. That stops a run of bad tokens from consuming the
+next declaration. The function is Apache-2.0 under its file header.
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/parser/StatementParser.kt
+
 The rest of the lexer and parser is an original subset. It is not a
 translation of `JavaParser.kt` or the Pratt expression engine, and it does
 not include IntelliJ platform services (PSI, VirtualFile, ProgressManager,

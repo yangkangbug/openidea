@@ -60,6 +60,8 @@ Against IntelliJ `840d3be11dfdeada533d05052008b48816b6cc4e` this is not a PSI po
 | --- | --- |
 | Brace-balance reparse check | Reimplemented from `SyntaxBuilderUtil.checkBraceBalance` |
 | Lambda lookahead | Reimplemented from `parseLambdaAfterParenth` |
+| Statement recovery | Reimplemented from `StatementParser.parseStatements`: one bad token, then continue |
+| Node ranges | Leading trivia stays on the parent. A literal node's slice is the literal |
 | Method reference `::` | Independent parser; the node is the qualifier plus `::` plus a name or `new` |
 | Expression nodes for names and literals | Independent, so a binder has a node to start from |
 | `PrattExpressionParser` as a whole | Not translated |
