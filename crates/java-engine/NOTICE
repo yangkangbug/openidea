@@ -1,0 +1,67 @@
+This crate is Apache-2.0, the same license as the OpenIDEA repository
+(see the repository root LICENSE).
+
+The function `balanced_brace_block` in `src/reparse.rs` is a Rust
+reimplementation of `SyntaxBuilderUtil.checkBraceBalance` /
+`hasProperBraceBalance`, called by `JavaCodeBlockParser.canBeReparsedIncrementally`
+in JetBrains intellij-community at commit
+840d3be11dfdeada533d05052008b48816b6cc4e:
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/platform/syntax/syntax-util/src/com/intellij/platform/syntax/util/parser/SyntaxBuilderUtil.kt
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/element/lazyParser/JavaCodeBlockParser.kt
+
+Those two files state: "Copyright 2000-2025 JetBrains s.r.o. and contributors.
+Use of this source code is governed by the Apache 2.0 license."
+That file header is the license for this derivative, not the separate
+"JetBrains Open-Source Build Terms" document at the root of
+intellij-community (LICENSE.txt there), which governs the IDE product build.
+
+`Parser::lambda_decision` follows the commit/rollback rule of
+`PrattExpressionParser.parseLambdaAfterParenth` in the same tree: a
+parenthesized parameter list is a lambda when `->` follows it, and is not
+parsed as one otherwise. That function is Apache-2.0 under the same file
+header. The Rust function is a reimplementation of that decision, not a copy
+of the Pratt parser.
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/parser/PrattExpressionParser.kt
+
+`Parser::recover_stmt` follows `StatementParser.parseStatements` in the same
+tree: when the current token does not start a statement, one token becomes an
+error and parsing continues. That stops a run of bad tokens from consuming the
+next declaration. The function is Apache-2.0 under its file header.
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-syntax/src/com/intellij/java/syntax/parser/StatementParser.kt
+
+`Project` name binding is an original index over this parser's trees. One
+rule comes from `ResolveClassUtil.resolveClass` in the same tree: the walk's
+result is a class only when the processor returned exactly one candidate.
+More than one candidate stays ambiguous here, and zero stays unresolved.
+`ClassResolverProcessor` itself is not translated.
+
+https://github.com/JetBrains/intellij-community/blob/840d3be11dfdeada533d05052008b48816b6cc4e/java/java-psi-impl/src/com/intellij/psi/impl/source/resolve/ResolveClassUtil.java
+
+That file states: "Copyright 2000-2024 JetBrains s.r.o. and contributors.
+Use of this source code is governed by the Apache 2.0 license."
+
+Compiled classes in that IntelliJ tree are not parsed by the sources above.
+`StubBuildingVisitor` extends ASM `org.jetbrains.org.objectweb.asm.ClassVisitor`
+and builds stubs; `ClsClassImpl` then implements the same `PsiClass` interface
+as a source class. This crate does not copy ASM, `StubBuildingVisitor`, or
+`ClsClassImpl`. It parses class files with the `cafebabe` crate, version
+0.9.0, by Kartikaya Gupta, which is 0BSD and contains `forbid(unsafe_code)`:
+
+https://github.com/staktrace/cafebabe
+
+`cafebabe` 0.9.0 depends on `bitflags` 1.3.2 (MIT OR Apache-2.0) and `cesu8`
+1.1.0 (MIT OR Apache-2.0, Eric Kidd; some of `cesu8` is adapted from Rust's
+`libcore` and keeps that project's license). No further transitive crates are
+required. None of them invoke a JVM.
+
+The rest of the lexer, parser, binder, and supertype walk is original. It is
+not a translation of `JavaParser.kt`, the Pratt expression engine, IntelliJ's
+scope processor, or `PsiClass.getSuperTypes`. It does not include IntelliJ
+platform services (PSI, VirtualFile, ProgressManager, stub indexes, or the
+compiler). No files from IntelliJ `java/java-tests/testData` are copied.
+Fixtures under `tests/fixtures/` and the sources in `tests/bind.rs` and
+`tests/classfile.rs` were written for this crate. `Lib.class` is a class file
+assembled to JVMS §4 with major version 61. It was not produced by javac.
