@@ -1,9 +1,9 @@
-//! Rust Java syntax and source-name kernel.
+//! Rust Java syntax and name-binding kernel.
 //!
 //! This crate parses a subset of Java source, reparses a brace-balanced block
-//! after an edit, and binds names across the source files handed to
-//! [`Project`]. It does not read class files or run on a JVM. It is not wired
-//! to jdtls or the editor UI.
+//! after an edit, reads class-file signatures, and binds names across the
+//! source files and class files handed to [`Project`]. It does not run on a
+//! JVM. It is not wired to jdtls or the editor UI.
 //!
 //! # What the parser accepts
 //!
@@ -23,10 +23,13 @@
 //! `switch`, patterns, modules, and explicit type arguments on a call
 //! (`Collections.<String>emptyList()`) are outside this subset. `switch` is
 //! skipped as an error node. Try-with-resources declares the resource names.
-//! [`Project`] binds simple and qualified names across source files. It does
-//! not read class files, walk supertypes, or choose among overloads.
+//! [`Project`] binds simple and qualified names across source files and class
+//! files that were added explicitly. It walks `extends` and `implements` for
+//! fields and methods. It does not choose among overloads or instantiate
+//! generic signatures.
 
 mod bind;
+mod classfile;
 mod green;
 mod kind;
 mod lex;
@@ -34,6 +37,9 @@ mod parse;
 mod reparse;
 
 pub use bind::{Project, ResolveResult, ResolveStatus, Target, TargetKind};
+pub use classfile::{
+    Access, ClassError, ClassErrorKind, ClassSignature, MemberKind, MemberSignature, parse_class_bytes,
+};
 
 pub use green::{GreenElement, GreenNode, GreenToken, SyntaxError};
 pub use kind::SyntaxKind;

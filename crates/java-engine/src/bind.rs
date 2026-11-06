@@ -1,22 +1,31 @@
-//! Source-only name binding for a set of Java files.
+//! Name binding for source files and class files registered on one project.
 //!
 //! The search order for a simple name follows JLS 6.5: a local or parameter
 //! in the innermost scope, then a field of a lexically enclosing type, then
 //! a single-type import, then a top-level type in the same compilation unit,
 //! then the same package, then on-demand imports. `java.lang` is an on-demand
-//! import only for types that are actually in this project.
+//! import only for types that are actually in this project. A call does not
+//! fall through to a type.
 //!
 //! IntelliJ's `ResolveClassUtil.resolveClass` (intellij-community
 //! `840d3be11dfdeada533d05052008b48816b6cc4e`) returns a class only when the
 //! scope walk produced exactly one candidate. This module uses that same
-//! one-candidate rule. It does not copy the resolver, and it does not walk
-//! supertypes or run overload resolution.
+//! one-candidate rule. It does not copy the resolver.
 //!
-//! External class files and the JDK are not consulted. A missing external
-//! type stays unresolved.
+//! Field and method lookup walks `extends` and `implements`, including class
+//! files registered on [`Project`]. A missing supertype contributes nothing.
+//! A cycle is [`ResolveStatus::Cycle`]. Two members that share a name stay
+//! ambiguous or [`ResolveStatus::OverloadNotResolved`]; the first is not
+//! chosen. A source shape is not compared with a class-file descriptor
+//! ([`ResolveStatus::SignatureNotCompared`]). The index is rebuilt on every
+//! query. There is no JDK and no classpath beyond what the caller added.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
+use crate::classfile::{
+    Access, ClassError, ClassSignature, MemberKind, MemberSignature, parse_class_bytes, read_class_directory,
+};
 use crate::green::GreenNode;
 use crate::kind::SyntaxKind;
 use crate::{EditResult, ParsedFile, TextEdit};
@@ -36,6 +45,14 @@ pub enum ResolveStatus {
     Package,
     /// `Type::new`. Constructors are not chosen.
     ConstructorRefNotBound,
+    /// `extends` / `implements` visits a type that is already on the path.
+    Cycle,
+    /// The name is declared in more than one place and a source parameter
+    /// list cannot be compared with a class-file descriptor, so override and
+    /// overload are both possible.
+    SignatureNotCompared,
+    /// The only candidates have contradictory access flags.
+    NotDetermined,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +101,7 @@ impl ResolveResult {
 #[derive(Clone, Debug, Default)]
 pub struct Project {
     files: BTreeMap<String, ParsedFile>,
+    binaries: BTreeMap<String, ClassSignature>,
 }
 
 impl Project {
@@ -107,12 +125,44 @@ impl Project {
         Some(result)
     }
 
+    /// Parse `bytes` and register them under `origin`. A later call with the
+    /// same origin replaces the class. The next [`Project::resolve_at`] rebuilds
+    /// the index from the current map.
+    pub fn add_class_bytes(&mut self, origin: impl Into<String>, bytes: &[u8]) -> Result<(), ClassError> {
+        let origin = origin.into();
+        let signature = parse_class_bytes(&origin, bytes)?;
+        self.binaries.insert(origin, signature);
+        Ok(())
+    }
+
+    /// Register every `*.class` file under `root`. One bad file fails the call
+    /// and leaves previously registered classes unchanged.
+    pub fn add_class_directory(&mut self, root: &Path) -> Result<Vec<String>, ClassError> {
+        let parsed = read_class_directory(root)?;
+        let origins = parsed.iter().map(|class| class.origin.clone()).collect();
+        for class in parsed {
+            self.binaries.insert(class.origin.clone(), class);
+        }
+        Ok(origins)
+    }
+
+    pub fn remove_class(&mut self, origin: &str) -> bool {
+        self.binaries.remove(origin).is_some()
+    }
+
+    pub fn class_signature(&self, origin: &str) -> Option<&ClassSignature> {
+        self.binaries.get(origin)
+    }
+
     /// Bind the name whose range contains `byte` (half-open).
+    ///
+    /// The index is built from the current sources and class files on every
+    /// call. Nothing is cached between queries.
     pub fn resolve_at(&self, path: &str, byte: u32) -> ResolveResult {
         let Some(parsed) = self.files.get(path) else {
             return ResolveResult::none(ResolveStatus::Unresolved);
         };
-        let index = Index::build(&self.files);
+        let index = Index::build(&self.files, &self.binaries);
         index.resolve(path, parsed, byte)
     }
 }
@@ -129,6 +179,8 @@ struct Member {
     start: u32,
     end: u32,
     declared: Option<QualName>,
+    access: Access,
+    shape: Shape,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +192,9 @@ struct ClassRec {
     name_end: u32,
     range_start: u32,
     range_end: u32,
+    super_parts: Option<Vec<String>>,
+    interface_parts: Vec<Vec<String>>,
+    binary: bool,
     fields: Vec<Member>,
     methods: Vec<Member>,
 }
@@ -192,16 +247,18 @@ struct FileRec {
 
 struct Index {
     files: Vec<FileRec>,
+    binaries: Vec<ClassRec>,
 }
 
 impl Index {
-    fn build(sources: &BTreeMap<String, ParsedFile>) -> Self {
+    fn build(sources: &BTreeMap<String, ParsedFile>, binaries: &BTreeMap<String, ClassSignature>) -> Self {
         let files = sources.iter().map(|(path, file)| index_file(path, file)).collect();
-        Self { files }
+        let binaries = binaries.values().map(class_from_signature).collect();
+        Self { files, binaries }
     }
 
     fn classes(&self) -> impl Iterator<Item = &ClassRec> {
-        self.files.iter().flat_map(|file| file.classes.iter())
+        self.files.iter().flat_map(|file| file.classes.iter()).chain(self.binaries.iter())
     }
 
     fn resolve(&self, path: &str, parsed: &ParsedFile, byte: u32) -> ResolveResult {
@@ -239,6 +296,10 @@ impl Index {
             if methods.status != ResolveStatus::Unresolved {
                 return methods;
             }
+            if file.static_names.iter().any(|imported| imported == name) {
+                return ResolveResult::none(ResolveStatus::StaticImportNotApplied);
+            }
+            return ResolveResult::none(ResolveStatus::Unresolved);
         } else if let Some(result) = self.fields_named(file, byte, name) {
             return result;
         }
@@ -281,35 +342,22 @@ impl Index {
 
     fn fields_named(&self, file: &FileRec, byte: u32, name: &str) -> Option<ResolveResult> {
         for class in enclosing_classes(file, byte) {
-            let fields: Vec<_> = class.fields.iter().filter(|field| field.name == name).collect();
-            if fields.len() == 1 {
-                return Some(ResolveResult::one(ResolveStatus::Resolved, member_target(class, fields[0])));
-            }
-            if fields.len() > 1 {
-                return Some(ResolveResult::many(
-                    ResolveStatus::Ambiguous,
-                    fields.into_iter().map(|field| member_target(class, field)).collect(),
-                ));
+            let result = self.lookup_fields(class, name, file, byte);
+            if result.status != ResolveStatus::Unresolved {
+                return Some(result);
             }
         }
         None
     }
 
     fn methods_here(&self, file: &FileRec, byte: u32, name: &str) -> ResolveResult {
-        let mut found = Vec::new();
         for class in enclosing_classes(file, byte) {
-            let methods: Vec<_> = class.methods.iter().filter(|method| method.name == name).collect();
-            if methods.is_empty() {
-                continue;
+            let result = self.lookup_methods(class, name, file, byte);
+            if result.status != ResolveStatus::Unresolved {
+                return result;
             }
-            found.extend(methods.into_iter().map(|method| member_target(class, method)));
-            break;
         }
-        match found.len() {
-            0 => ResolveResult::none(ResolveStatus::Unresolved),
-            1 => ResolveResult::many(ResolveStatus::Resolved, found),
-            _ => ResolveResult::many(ResolveStatus::OverloadNotResolved, found),
-        }
+        ResolveResult::none(ResolveStatus::Unresolved)
     }
 
     fn simple_type<'a>(&'a self, file: &'a FileRec, name: &str, byte: u32) -> TypeLookup<'a> {
@@ -332,14 +380,6 @@ impl Index {
             let mut all = imported;
             all.extend(same_unit);
             return if all.len() == 1 { TypeLookup::One(all[0]) } else { TypeLookup::Many(all) };
-        }
-        let same_unit: Vec<_> =
-            file.classes.iter().filter(|class| class.nesting.len() == 1 && class.simple() == name).collect();
-        if same_unit.len() == 1 {
-            return TypeLookup::One(same_unit[0]);
-        }
-        if same_unit.len() > 1 {
-            return TypeLookup::Many(same_unit);
         }
         let same_package: Vec<_> = self
             .classes()
@@ -381,7 +421,7 @@ impl Index {
                 TypeLookup::None | TypeLookup::MissingImport => ResolveResult::none(ResolveStatus::Unresolved),
             };
         }
-        self.qualify(file, &prefix, false)
+        self.qualify(file, &prefix, false, byte)
     }
 
     fn resolve_field(&self, file: &FileRec, _parsed: &ParsedFile, hit: Hit<'_>, byte: u32) -> ResolveResult {
@@ -389,10 +429,10 @@ impl Index {
         let Some(index) = chain.iter().position(|segment| segment.start <= byte && byte < segment.end) else {
             return ResolveResult::none(ResolveStatus::Unresolved);
         };
-        self.resolve_chain(file, &chain[..=index], hit.call)
+        self.resolve_chain(file, &chain[..=index], hit.call, byte)
     }
 
-    fn resolve_chain(&self, file: &FileRec, chain: &[Segment], call: bool) -> ResolveResult {
+    fn resolve_chain(&self, file: &FileRec, chain: &[Segment], call: bool, byte: u32) -> ResolveResult {
         if chain.is_empty() {
             return ResolveResult::none(ResolveStatus::Unresolved);
         }
@@ -407,20 +447,20 @@ impl Index {
                 return current;
             }
             for (index, segment) in chain.iter().enumerate().skip(2) {
-                current = self.member_from_base(file, &current, &segment.name, call && index + 1 == chain.len());
+                current = self.member_from_base(file, &current, &segment.name, call && index + 1 == chain.len(), byte);
             }
             return current;
         }
         let mut current = self.simple_name(file, chain[0].start, &chain[0].name, false);
         if matches!(current.status, ResolveStatus::Unresolved | ResolveStatus::StaticImportNotApplied) {
-            current = self.qualify(file, &[chain[0].name.clone()], false);
+            current = self.qualify(file, &[chain[0].name.clone()], false, byte);
         }
         for (index, segment) in chain.iter().enumerate().skip(1) {
             let last = index + 1 == chain.len();
-            let next = self.member_from_base(file, &current, &segment.name, call && last);
+            let next = self.member_from_base(file, &current, &segment.name, call && last, byte);
             if matches!(next.status, ResolveStatus::Unresolved | ResolveStatus::ReceiverNotBound) {
                 let parts = chain[..=index].iter().map(|segment| segment.name.clone()).collect::<Vec<_>>();
-                let qualified = self.qualify(file, &parts, call && last);
+                let qualified = self.qualify(file, &parts, call && last, byte);
                 current = if qualified.status == ResolveStatus::Unresolved { next } else { qualified };
             } else {
                 current = next;
@@ -440,10 +480,17 @@ impl Index {
         let Some(class) = enclosing_classes(file, byte).into_iter().next() else {
             return ResolveResult::none(ResolveStatus::Unresolved);
         };
-        members_named(class, name, call)
+        self.lookup_member(class, name, call, file, byte)
     }
 
-    fn member_from_base(&self, file: &FileRec, base: &ResolveResult, name: &str, call: bool) -> ResolveResult {
+    fn member_from_base(
+        &self,
+        file: &FileRec,
+        base: &ResolveResult,
+        name: &str,
+        call: bool,
+        byte: u32,
+    ) -> ResolveResult {
         match base.status {
             ResolveStatus::Resolved | ResolveStatus::Ambiguous if base.targets.len() == 1 => {
                 let target = &base.targets[0];
@@ -454,7 +501,7 @@ impl Index {
                         else {
                             return ResolveResult::none(ResolveStatus::Unresolved);
                         };
-                        members_named(class, name, call)
+                        self.lookup_member(class, name, call, file, byte)
                     }
                     TargetKind::Local | TargetKind::Parameter | TargetKind::Resource | TargetKind::Field => {
                         let declared = declared_of(file, target);
@@ -462,7 +509,7 @@ impl Index {
                             return ResolveResult::none(ResolveStatus::ReceiverNotBound);
                         };
                         match self.lookup_type_name(file, &qual.parts, target.start_byte) {
-                            TypeLookup::One(class) => members_named(class, name, call),
+                            TypeLookup::One(class) => self.lookup_member(class, name, call, file, byte),
                             TypeLookup::Many(_) => ResolveResult::none(ResolveStatus::Ambiguous),
                             TypeLookup::MissingImport | TypeLookup::None => {
                                 ResolveResult::none(ResolveStatus::ReceiverNotBound)
@@ -478,7 +525,7 @@ impl Index {
                     parts.extend(owner.owner.split('.').map(str::to_string));
                 }
                 parts.push(name.to_string());
-                self.qualify(file, &parts, call)
+                self.qualify(file, &parts, call, byte)
             }
             _ => {
                 let mut parts = Vec::new();
@@ -487,7 +534,7 @@ impl Index {
                 }
                 parts.push(name.to_string());
                 if parts.len() >= 2 {
-                    self.qualify(file, &parts, call)
+                    self.qualify(file, &parts, call, byte)
                 } else {
                     ResolveResult::none(ResolveStatus::ReceiverNotBound)
                 }
@@ -495,7 +542,7 @@ impl Index {
         }
     }
 
-    fn qualify(&self, file: &FileRec, parts: &[String], call: bool) -> ResolveResult {
+    fn qualify(&self, file: &FileRec, parts: &[String], call: bool, byte: u32) -> ResolveResult {
         if parts.is_empty() {
             return ResolveResult::none(ResolveStatus::Unresolved);
         }
@@ -515,15 +562,15 @@ impl Index {
                 return ResolveResult::one(ResolveStatus::Resolved, class.target());
             }
             if length + 1 == parts.len() {
-                return members_named(class, &parts[length], call);
+                return self.lookup_member(class, &parts[length], call, file, byte);
             }
-            let member = members_named(class, &parts[length], false);
+            let member = self.lookup_member(class, &parts[length], false, file, byte);
             if member.status != ResolveStatus::Resolved || member.targets.len() != 1 {
                 return member;
             }
             let mut rest = member;
             for next in &parts[length + 1..] {
-                rest = self.member_from_base(file, &rest, next, false);
+                rest = self.member_from_base(file, &rest, next, false, byte);
             }
             return rest;
         }
@@ -555,6 +602,241 @@ impl Index {
             _ => TypeLookup::Many(found),
         }
     }
+
+    fn lookup_member(&self, class: &ClassRec, name: &str, call: bool, site: &FileRec, byte: u32) -> ResolveResult {
+        if call { self.lookup_methods(class, name, site, byte) } else { self.lookup_fields(class, name, site, byte) }
+    }
+
+    fn lookup_fields(&self, class: &ClassRec, name: &str, site: &FileRec, byte: u32) -> ResolveResult {
+        let found = match self.collect(class, name, false, site, byte) {
+            Ok(found) => found,
+            Err(err) => return walk_error(err),
+        };
+        select_fields(found)
+    }
+
+    fn lookup_methods(&self, class: &ClassRec, name: &str, site: &FileRec, byte: u32) -> ResolveResult {
+        let found = match self.collect(class, name, true, site, byte) {
+            Ok(found) => found,
+            Err(err) => return walk_error(err),
+        };
+        select_methods(found)
+    }
+
+    fn collect(
+        &self,
+        class: &ClassRec,
+        name: &str,
+        call: bool,
+        site: &FileRec,
+        byte: u32,
+    ) -> Result<Vec<Candidate>, WalkError> {
+        let steps = self.hierarchy(class)?;
+        let mut found = Vec::new();
+        for step in steps {
+            let members: Vec<&Member> = if call {
+                step.class.methods.iter().filter(|member| member.name == name).collect()
+            } else {
+                step.class.fields.iter().filter(|member| member.name == name).collect()
+            };
+            for member in members {
+                if !self.can_see(member, step.class, class, site, byte)? {
+                    continue;
+                }
+                found.push(Candidate {
+                    target: member_target(step.class, member),
+                    depth: step.depth,
+                    shape: member.shape.clone(),
+                    unspecified: member.access == Access::Unspecified,
+                });
+            }
+        }
+        Ok(found)
+    }
+
+    fn hierarchy<'a>(&'a self, start: &'a ClassRec) -> Result<Vec<Step<'a>>, WalkError> {
+        let mut out = Vec::new();
+        let mut gray = Vec::new();
+        let mut black = BTreeSet::new();
+        self.walk(start, 0, &mut gray, &mut black, &mut out)?;
+        Ok(out)
+    }
+
+    fn walk<'a>(
+        &'a self,
+        class: &'a ClassRec,
+        depth: u32,
+        gray: &mut Vec<String>,
+        black: &mut BTreeSet<String>,
+        out: &mut Vec<Step<'a>>,
+    ) -> Result<(), WalkError> {
+        let name = class.dotted();
+        if gray.iter().any(|seen| seen == &name) {
+            return Err(WalkError::Cycle);
+        }
+        if !black.insert(name.clone()) {
+            return Ok(());
+        }
+        gray.push(name);
+        out.push(Step { class, depth });
+        let mut edges = Vec::new();
+        if let Some(super_parts) = &class.super_parts {
+            edges.push(super_parts.clone());
+        }
+        edges.extend(class.interface_parts.iter().cloned());
+        for edge in edges {
+            match self.resolve_edge(class, &edge) {
+                Named::None => {}
+                Named::Many(classes) => {
+                    return Err(WalkError::Ambiguous(classes.into_iter().map(ClassRec::target).collect()));
+                }
+                Named::One(next) => self.walk(next, depth + 1, gray, black, out)?,
+            }
+        }
+        gray.pop();
+        Ok(())
+    }
+
+    fn can_see(
+        &self,
+        member: &Member,
+        declaring: &ClassRec,
+        start: &ClassRec,
+        site: &FileRec,
+        byte: u32,
+    ) -> Result<bool, WalkError> {
+        match member.access {
+            Access::Public | Access::Unspecified => Ok(true),
+            Access::Package => Ok(site.package == declaring.package),
+            Access::Private => Ok(declaring.dotted() == start.dotted()
+                && declaring.path == start.path
+                && enclosing_classes(site, byte).iter().any(|class| same_class(class, declaring))),
+            Access::Protected => {
+                if site.package == declaring.package
+                    || enclosing_classes(site, byte).iter().any(|class| same_class(class, start))
+                {
+                    return Ok(true);
+                }
+                for class in enclosing_classes(site, byte) {
+                    let steps = self.hierarchy(class)?;
+                    if steps.iter().any(|step| same_class(step.class, declaring)) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn resolve_edge<'a>(&'a self, class: &ClassRec, parts: &[String]) -> Named<'a> {
+        if class.binary {
+            return self.class_named(&parts.join("."));
+        }
+        let Some(file) = self.files.iter().find(|file| file.path == class.path) else {
+            return Named::None;
+        };
+        match self.lookup_type_name(file, parts, class.name_start) {
+            TypeLookup::One(found) => Named::One(found),
+            TypeLookup::Many(found) => Named::Many(found),
+            TypeLookup::None | TypeLookup::MissingImport => Named::None,
+        }
+    }
+
+    fn class_named<'a>(&'a self, dotted: &str) -> Named<'a> {
+        let found: Vec<_> = self.classes().filter(|class| class.dotted() == dotted).collect();
+        match found.len() {
+            0 => Named::None,
+            1 => Named::One(found[0]),
+            _ => Named::Many(found),
+        }
+    }
+}
+
+enum Named<'a> {
+    None,
+    One(&'a ClassRec),
+    Many(Vec<&'a ClassRec>),
+}
+
+fn walk_error(err: WalkError) -> ResolveResult {
+    match err {
+        WalkError::Cycle => ResolveResult::none(ResolveStatus::Cycle),
+        WalkError::Ambiguous(targets) => ResolveResult::many(ResolveStatus::Ambiguous, targets),
+    }
+}
+
+fn select_fields(found: Vec<Candidate>) -> ResolveResult {
+    if found.is_empty() {
+        return ResolveResult::none(ResolveStatus::Unresolved);
+    }
+    if found.iter().all(|candidate| candidate.unspecified) {
+        return ResolveResult::many(
+            ResolveStatus::NotDetermined,
+            found.into_iter().map(|candidate| candidate.target).collect(),
+        );
+    }
+    let found: Vec<_> = found.into_iter().filter(|candidate| !candidate.unspecified).collect();
+    let min = found.iter().map(|candidate| candidate.depth).min().unwrap();
+    let nearest: Vec<_> =
+        found.into_iter().filter(|candidate| candidate.depth == min).map(|candidate| candidate.target).collect();
+    match nearest.len() {
+        0 => ResolveResult::none(ResolveStatus::Unresolved),
+        1 => ResolveResult::many(ResolveStatus::Resolved, nearest),
+        _ => ResolveResult::many(ResolveStatus::Ambiguous, nearest),
+    }
+}
+
+fn select_methods(found: Vec<Candidate>) -> ResolveResult {
+    if found.is_empty() {
+        return ResolveResult::none(ResolveStatus::Unresolved);
+    }
+    if found.iter().all(|candidate| candidate.unspecified) {
+        return ResolveResult::many(
+            ResolveStatus::NotDetermined,
+            found.into_iter().map(|candidate| candidate.target).collect(),
+        );
+    }
+    let found: Vec<_> = found.into_iter().filter(|candidate| !candidate.unspecified).collect();
+    if found.iter().any(|candidate| candidate.shape == Shape::Unknown) {
+        return ResolveResult::many(
+            ResolveStatus::SignatureNotCompared,
+            found.into_iter().map(|candidate| candidate.target).collect(),
+        );
+    }
+    let mixes_representations = found.iter().any(|candidate| matches!(candidate.shape, Shape::Source(_)))
+        && found.iter().any(|candidate| matches!(candidate.shape, Shape::Binary(_)));
+    if mixes_representations {
+        return ResolveResult::many(
+            ResolveStatus::SignatureNotCompared,
+            found.into_iter().map(|candidate| candidate.target).collect(),
+        );
+    }
+    let mut groups: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+    for candidate in found {
+        let key = match &candidate.shape {
+            Shape::Source(text) | Shape::Binary(text) => text.clone(),
+            Shape::Unknown => String::new(),
+        };
+        groups.entry(key).or_default().push(candidate);
+    }
+    let mut kept = Vec::new();
+    for group in groups.into_values() {
+        let min = group.iter().map(|candidate| candidate.depth).min().unwrap();
+        kept.extend(group.into_iter().filter(|candidate| candidate.depth == min));
+    }
+    let status = if kept.len() == 1 {
+        ResolveStatus::Resolved
+    } else if groups_one_shape(&kept) {
+        ResolveStatus::Ambiguous
+    } else {
+        ResolveStatus::OverloadNotResolved
+    };
+    ResolveResult::many(status, kept.into_iter().map(|candidate| candidate.target).collect())
+}
+
+fn groups_one_shape(kept: &[Candidate]) -> bool {
+    let Some(first) = kept.first() else { return true };
+    kept.iter().all(|candidate| candidate.shape == first.shape)
 }
 
 enum TypeLookup<'a> {
@@ -564,31 +846,32 @@ enum TypeLookup<'a> {
     MissingImport,
 }
 
-fn members_named(class: &ClassRec, name: &str, call: bool) -> ResolveResult {
-    if call {
-        let methods: Vec<_> = class
-            .methods
-            .iter()
-            .filter(|method| method.name == name)
-            .map(|method| member_target(class, method))
-            .collect::<Vec<_>>();
-        return match methods.len() {
-            0 => ResolveResult::none(ResolveStatus::Unresolved),
-            1 => ResolveResult::many(ResolveStatus::Resolved, methods),
-            _ => ResolveResult::many(ResolveStatus::OverloadNotResolved, methods),
-        };
-    }
-    let fields: Vec<_> = class
-        .fields
-        .iter()
-        .filter(|field| field.name == name)
-        .map(|field| member_target(class, field))
-        .collect::<Vec<_>>();
-    match fields.len() {
-        0 => ResolveResult::none(ResolveStatus::Unresolved),
-        1 => ResolveResult::many(ResolveStatus::Resolved, fields),
-        _ => ResolveResult::many(ResolveStatus::Ambiguous, fields),
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Shape {
+    Unknown,
+    Source(String),
+    Binary(String),
+}
+
+fn same_class(left: &ClassRec, right: &ClassRec) -> bool {
+    left.path == right.path && left.dotted() == right.dotted()
+}
+
+struct Candidate {
+    target: Target,
+    depth: u32,
+    shape: Shape,
+    unspecified: bool,
+}
+
+enum WalkError {
+    Cycle,
+    Ambiguous(Vec<Target>),
+}
+
+struct Step<'a> {
+    class: &'a ClassRec,
+    depth: u32,
 }
 
 fn member_target(class: &ClassRec, member: &Member) -> Target {
@@ -910,7 +1193,7 @@ fn index_class(node: &GreenNode, start: u32, ctx: &mut IndexCtx<'_>) {
     let mut nesting =
         ctx.class_stack.iter().map(|index| ctx.file.classes[*index].simple().to_string()).collect::<Vec<_>>();
     nesting.push(name);
-    let class = ClassRec {
+    let mut class = ClassRec {
         path: ctx.file.path.clone(),
         package: ctx.file.package.clone(),
         nesting,
@@ -918,9 +1201,15 @@ fn index_class(node: &GreenNode, start: u32, ctx: &mut IndexCtx<'_>) {
         name_end,
         range_start: start,
         range_end: start + node.utf8_len(),
+        super_parts: None,
+        interface_parts: Vec::new(),
+        binary: false,
         fields: Vec::new(),
         methods: Vec::new(),
     };
+    let (super_parts, interface_parts) = declared_supers(node, start);
+    class.super_parts = super_parts;
+    class.interface_parts = interface_parts;
     let index = ctx.file.classes.len();
     ctx.file.classes.push(class);
     ctx.class_stack.push(index);
@@ -952,6 +1241,8 @@ fn index_components(params: &GreenNode, start: u32, ctx: &mut IndexCtx<'_>, clas
                 start: name_start,
                 end: name_end,
                 declared: read_type(child, offset),
+                access: read_access(child, offset),
+                shape: source_type_shape(child, offset),
             });
         }
         offset += child.utf8_len();
@@ -960,7 +1251,19 @@ fn index_components(params: &GreenNode, start: u32, ctx: &mut IndexCtx<'_>, clas
 
 fn index_members(node: &GreenNode, start: u32, ctx: &mut IndexCtx<'_>, class_index: usize, kind: TargetKind) {
     if let Some((name, name_start, name_end)) = direct_ident(node, start) {
-        let member = Member { name, kind, start: name_start, end: name_end, declared: read_type(node, start) };
+        let member = Member {
+            name,
+            kind,
+            start: name_start,
+            end: name_end,
+            declared: read_type(node, start),
+            access: read_access(node, start),
+            shape: if kind == TargetKind::Method {
+                source_method_shape(node, start)
+            } else {
+                source_type_shape(node, start)
+            },
+        };
         if kind == TargetKind::Field {
             ctx.file.classes[class_index].fields.push(member);
         } else {
@@ -1079,6 +1382,149 @@ fn try_body_end(node: &GreenNode, start: u32) -> Option<u32> {
         offset += child.utf8_len();
     }
     None
+}
+
+fn declared_supers(node: &GreenNode, start: u32) -> (Option<Vec<String>>, Vec<Vec<String>>) {
+    let mut phase = 0u8;
+    let mut extends = Vec::new();
+    let mut implements = Vec::new();
+    let mut offset = start;
+    for child in node.children() {
+        if let Some(token) = child.as_token() {
+            if token.kind() == SyntaxKind::Extends {
+                phase = 1;
+            } else if token.kind() == SyntaxKind::Implements {
+                phase = 2;
+            }
+        }
+        if let Some(child) = child.as_node()
+            && child.kind() == SyntaxKind::Type
+            && let Some(name) = type_parts(child, offset)
+        {
+            if phase == 1 {
+                extends.push(name);
+            } else if phase == 2 {
+                implements.push(name);
+            }
+        }
+        offset += child.utf8_len();
+    }
+    let object = vec!["java".to_string(), "lang".to_string(), "Object".to_string()];
+    match node.kind() {
+        SyntaxKind::Interface => (Some(object), extends),
+        SyntaxKind::Enum => (Some(vec!["java".to_string(), "lang".to_string(), "Enum".to_string()]), implements),
+        SyntaxKind::Record => (Some(vec!["java".to_string(), "lang".to_string(), "Record".to_string()]), implements),
+        _ => (Some(extends.into_iter().next().unwrap_or(object)), implements),
+    }
+}
+
+fn type_parts(node: &GreenNode, start: u32) -> Option<Vec<String>> {
+    let (ty, at) =
+        if node.kind() == SyntaxKind::Type { (node, start) } else { child_kind(node, start, SyntaxKind::Type)? };
+    let (name, name_at) = child_kind(ty, at, SyntaxKind::Name)?;
+    let parts = name_strings(name, name_at);
+    if parts.is_empty() { None } else { Some(parts) }
+}
+
+fn type_dotted(node: &GreenNode, start: u32) -> Option<String> {
+    type_parts(node, start).map(|parts| parts.join("."))
+}
+
+fn read_access(node: &GreenNode, start: u32) -> Access {
+    let Some((mods, _)) = child_kind(node, start, SyntaxKind::ModifierList) else {
+        return Access::Package;
+    };
+    let mut seen = Vec::new();
+    for (kind, _, _) in tokens(mods, 0) {
+        match kind {
+            SyntaxKind::Public => seen.push(Access::Public),
+            SyntaxKind::Protected => seen.push(Access::Protected),
+            SyntaxKind::Private => seen.push(Access::Private),
+            _ => {}
+        }
+    }
+    match seen.as_slice() {
+        [] => Access::Package,
+        [one] => *one,
+        _ => Access::Unspecified,
+    }
+}
+
+fn source_type_shape(node: &GreenNode, start: u32) -> Shape {
+    match read_type(node, start) {
+        Some(name) => Shape::Source(name.parts.join(".")),
+        None => Shape::Unknown,
+    }
+}
+
+fn source_method_shape(node: &GreenNode, start: u32) -> Shape {
+    let Some((params, params_at)) = child_kind(node, start, SyntaxKind::ParamList) else {
+        return Shape::Unknown;
+    };
+    let mut parts = Vec::new();
+    let mut offset = params_at;
+    for child in params.children() {
+        if let Some(child) = child.as_node()
+            && child.kind() == SyntaxKind::Parameter
+        {
+            let Some(ty) = type_dotted(child, offset).or_else(|| primitive_type(child, offset)) else {
+                return Shape::Unknown;
+            };
+            parts.push(ty);
+        }
+        offset += child.utf8_len();
+    }
+    Shape::Source(format!("({})", parts.join(",")))
+}
+
+fn primitive_type(node: &GreenNode, start: u32) -> Option<String> {
+    let (ty, at) = child_kind(node, start, SyntaxKind::Type)?;
+    tokens(ty, at).into_iter().find_map(|(kind, _, _)| match kind {
+        SyntaxKind::IntKw => Some("int".to_string()),
+        SyntaxKind::LongKw => Some("long".to_string()),
+        SyntaxKind::Short => Some("short".to_string()),
+        SyntaxKind::Byte => Some("byte".to_string()),
+        SyntaxKind::CharKw => Some("char".to_string()),
+        SyntaxKind::BooleanKw => Some("boolean".to_string()),
+        SyntaxKind::FloatKw => Some("float".to_string()),
+        SyntaxKind::DoubleKw => Some("double".to_string()),
+        SyntaxKind::Void => Some("void".to_string()),
+        _ => None,
+    })
+}
+
+fn class_from_signature(sig: &ClassSignature) -> ClassRec {
+    ClassRec {
+        path: sig.origin.clone(),
+        package: sig.package.clone(),
+        nesting: sig.nesting.clone(),
+        name_start: 0,
+        name_end: 0,
+        range_start: 0,
+        range_end: 0,
+        super_parts: sig.super_class.as_ref().map(|name| name.split('.').map(str::to_string).collect()),
+        interface_parts: sig.interfaces.iter().map(|name| name.split('.').map(str::to_string).collect()).collect(),
+        binary: true,
+        fields: sig.fields.iter().map(|member| member_from_signature(member, TargetKind::Field)).collect(),
+        methods: sig
+            .methods
+            .iter()
+            .filter(|member| member.name != "<init>" && member.kind == MemberKind::Method)
+            .map(|member| member_from_signature(member, TargetKind::Method))
+            .collect(),
+    }
+}
+
+fn member_from_signature(member: &MemberSignature, kind: TargetKind) -> Member {
+    Member {
+        name: member.name.clone(),
+        kind,
+        start: 0,
+        end: 0,
+        declared: None,
+        access: member.access,
+        shape: Shape::Binary(member.descriptor.clone()),
+    }
 }
 
 fn read_type(node: &GreenNode, start: u32) -> Option<QualName> {

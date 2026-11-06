@@ -1,6 +1,6 @@
 [package]
 name = "java-engine"
-description = "Standalone Rust Java engine: lexer, parser, brace-block reparse, and source-only name binding. No JVM and no class files."
+description = "Standalone Rust Java engine: lexer, parser, brace-block reparse, class-file signatures, and name binding. No JVM."
 version = "0.1.37"
 edition = "2024"
 rust-version = "1.96"
@@ -10,3 +10,6 @@ readme = "README.md"
 publish = false
 
 [dependencies]
+# Class-file reader. 0BSD. Direct dependencies: bitflags (MIT OR Apache-2.0),
+# cesu8 (MIT OR Apache-2.0). No JVM. See NOTICE.
+cafebabe = "0.9.0"

@@ -1,8 +1,7 @@
 # java-engine
 
-Standalone Rust kernel for a subset of Java syntax and for name binding across
-source files. It does not start a JVM, does not read class files, and does not
-talk to jdtls.
+Standalone Rust kernel for a subset of Java syntax, class-file signatures, and
+name binding. It does not start a JVM and does not talk to jdtls.
 
 The OpenIDEA editor still uses jdtls for Java. This crate is not connected to
 the UI or to language-server startup. Its `Cargo.toml` does not inherit
@@ -33,9 +32,10 @@ false so this is not sent to crates.io.
 ## Goal and what this crate actually does
 
 The goal is a native Java analysis engine: syntax, binding, class path,
-generics and overload resolution, then reference search. Syntax and a source-only
-binder are implemented. Class files, the JDK, inheritance, and overload
-selection are not.
+generics and overload resolution, then reference search. Syntax, class-file
+signatures, and name binding across source files and those class files are
+implemented. A JDK is not included. Overload selection and generic instantiation
+are not.
 
 ### Syntax
 
@@ -66,11 +66,26 @@ selection are not.
   string ends at the newline and the braces still balance, the enclosing block
   is parsed again and the sibling method node is kept.
 
-### Source binding
+### Names, class files, and supertypes
 
-`Project` holds parsed files by caller-chosen path. `resolve_at` rebuilds the
-index from those trees, so `Project::edit` cannot return a binding from the
-previous text.
+`Project` holds parsed files and class files by caller-chosen path.
+`resolve_at` rebuilds the index from those inputs on every call. Nothing is
+cached between queries, so `edit`, `add_class_bytes`, `add_class_directory`,
+and `remove_class` are visible to the next query. This rebuild is not a
+performance claim.
+
+`add_class_bytes` parses one class file. `add_class_directory` reads `*.class`
+files under a directory and does not follow symlinks. A truncated file, a bad
+magic, a bad constant pool, or a major version outside 45..=71 (or a minor
+other than 0 or 65535 when the major is at least 56) is an error and is not
+inserted. JARs are not opened. Maven and Gradle are not read. The bytes have
+to be handed to the project.
+
+Class files are parsed by `cafebabe` 0.9.0 (see `NOTICE`). The reader keeps
+the binary name, the superclass, interfaces, field and method descriptors, and
+the raw `Signature` attribute. `$` in a binary name is treated as javac's
+nesting separator. Constructors (`<init>`) are parsed and are not selected.
+`<clinit>` is dropped. Generic signatures are stored and not instantiated.
 
 A simple name is searched in this order, which is the JLS 6.5 order restricted
 to what this index stores:
@@ -78,16 +93,37 @@ to what this index stores:
 1. Local, parameter, or resource in the innermost recorded scope. A resource's
    scope runs from the `try` through the try block, and not into `catch` or
    `finally`. A local in a nested block hides an outer local of the same name.
-2. Field of a lexically enclosing type. `this.name` uses that field.
-   `super` is `ReceiverNotBound`.
-3. Member type of a lexically enclosing type. A nested type of a sibling class
-   is not a candidate.
+2. Field of a lexically enclosing type, then the same name on `extends` and
+   `implements`. A field on the nearer type hides one farther away. `this.name`
+   uses that search. `super` is `ReceiverNotBound`.
+3. Member type declared in a lexically enclosing type. Inherited member types
+   are not searched. A nested type of a sibling class is not a candidate.
 4. Single-type import. If that type is not in the project, the result is
-   `Unresolved`. The search does not continue to the same file or package.
-5. Top-level type in the same compilation unit.
-6. Top-level type in the same package.
-7. On-demand imports, plus `java.lang` only when a source file in the project
-   actually declares that type. The JDK is not assumed to exist.
+   `Unresolved`. The search does not continue.
+5. Top-level type in the same package, which includes the current compilation
+   unit and any class file with that package and simple name. Two definitions
+   of that name are `Ambiguous`.
+6. On-demand imports, plus `java.lang` only when that type was actually added
+   as source or as a class file. The JDK is not assumed to exist.
+
+A call does not fall through to a class of the same name. `extends` and
+`implements` are resolved in the compilation unit that wrote them, so `Lib` in
+package `lib` finds `lib.Lib`. A class or interface with no written superclass
+records `java.lang.Object` as that name; `enum` records `java.lang.Enum` and
+`record` records `java.lang.Record`. Members of those types appear only when
+the type itself was added.
+
+Access of a field or method:
+
+- `public` is visible.
+- `private` is visible only inside the declaring class. It is not inherited.
+- no modifier is visible only in the same package.
+- `protected` is visible in the same package, inside the receiver type, or
+  from a use site whose enclosing type has the declaring type as a supertype.
+  JLS 6.6.2's extra rule about the qualifying type is not implemented.
+- more than one of `public`, `protected`, and `private` is `NotDetermined`.
+
+`static` and instance are not distinguished.
 
 A qualified name (`b.Foo`, `box.value`) walks the longest indexed class prefix
 and then one member. A package prefix of an indexed class is `Package`, not a
@@ -100,8 +136,11 @@ Statuses that refuse to guess:
 | `Resolved` | Exactly one candidate |
 | `Unresolved` | No candidate, including a missing import target |
 | `Ambiguous` | Two or more types or fields. The first one is not chosen |
-| `OverloadNotResolved` | Two or more methods share the name. Argument count and types are not compared |
-| `ReceiverNotBound` | The qualifier is a value whose declared type is not an indexed source class, or it is `super` |
+| `OverloadNotResolved` | Two or more methods remain after a same-descriptor method nearer in the hierarchy hides a farther one. Descriptors are the JVM descriptor for a class file, or the source parameter list as written. The call's argument types are not compared, and the first method is not chosen |
+| `SignatureNotCompared` | The name exists as both a source declaration and a class-file member, or a parameter list could not be read. Override and overload are both possible |
+| `Cycle` | A supertype path visits a type that is already on that path |
+| `NotDetermined` | Every candidate has contradictory access flags |
+| `ReceiverNotBound` | The qualifier is a value whose declared type is not an indexed class, or it is `super` |
 | `StaticImportNotApplied` | The simple name is a static import. Those imports are recorded and not applied |
 | `Package` | The name is only a package prefix |
 | `ConstructorRefNotBound` | The selector is `new` after `::` |
@@ -112,17 +151,18 @@ at the commit in `NOTICE`. The scope processor is not a translation of
 
 Not implemented, and not claimed:
 
-- Class files, a classpath, or a JDK. A type that is not in `Project` stays
-  unresolved, including `java.lang.String` unless that source was inserted.
-- Supertypes. A method declared only on a superclass is `Unresolved` in the
-  subclass. `extends` is not walked.
-- Overload selection, generic inference, and capture. A generic type argument
-  list can be parsed. It is not instantiated.
-- Static imports, accessibility, modules, and local classes (a class inside a
-  method is not a statement in this parser).
-- Multi-catch. The catch parameter is bound, and its recorded type is the first
-  type before `|`.
-- Reference search, rename, and refactoring.
+- A JDK or any classpath the caller did not add. `java.lang.String` stays
+  unresolved until that source or class file is inserted.
+- Choosing one overload from several. A call `m(1)` with both `m()` and `m(int)`
+  indexed is `OverloadNotResolved`.
+- Treating a source method and a class-file method of the same name as an
+  override. That is `SignatureNotCompared`.
+- Instantiating a `Signature` attribute or a source type argument.
+- Static imports, modules, and local classes (a class inside a method is not a
+  statement in this parser).
+- The full protected-access rule, and any distinction between static and instance.
+- Multi-catch beyond the first type before `|`.
+- JARs, Maven, Gradle, reference search, rename, and refactoring.
 - Reuse inside the one reparsed brace node. That node is parsed again from its
   text. Green nodes outside it keep their allocations.
 
@@ -141,16 +181,21 @@ and not an IntelliJ-equivalent resolver.
 | Method reference `::` | Independent parser |
 | `PrattExpressionParser` as a whole | Not translated |
 | `ClassResolverProcessor` and the scope walk | Not translated. Search order above is the restricted JLS order |
+| Compiled class reading | Not ported. `StubBuildingVisitor` extends ASM `ClassVisitor` and builds stubs; `ClsClassImpl` then implements `PsiClass`. This crate parses with `cafebabe` and puts the signature in the same index as a source type |
+| Supertype member search | Independent walk of the indexed `extends` / `implements` links. Not `PsiClass.getSuperTypes` |
 | PSI, stubs, stub indexes, find-usages | Not started |
-| Class files, project model, compiler, inference | Not started |
+| Compiler, inference, JAR indexes | Not started |
 
 ## Layout
 
 `ParsedFile::parse` builds an owned green tree (`Arc` nodes). `apply_edit`
 takes UTF-8 byte offsets. `apply_utf16_edit` converts UTF-16 offsets first;
 a supplementary character is two UTF-16 units, and an offset inside one is
-rejected. `Project::insert`, `Project::edit`, and `Project::resolve_at` are the
-binding API. The public API depends only on the standard library.
+rejected. `Project::insert`, `Project::edit`, `Project::add_class_bytes`,
+`Project::add_class_directory`, `Project::remove_class`, and
+`Project::resolve_at` are the binding API. Dependencies are `cafebabe` 0.9.0
+(0BSD) and, through it, `bitflags` 1.3.2 and `cesu8` 1.1.0 (both MIT OR
+Apache-2.0). No dependency runs a JVM.
 
 ## Tests
 
@@ -160,8 +205,17 @@ names, generics (`List<List<String>>`), sibling reuse, a cross-method edit,
 UTF-16 emoji offsets, and quote deletion. Each edit is compared with
 `apply_edit_verified` and with a full parse. `tests/bind.rs` checks same-named
 classes, explicit and star imports, qualified names, nested members, local
-shadowing, resources, overload refusal, a missing import, static imports, and
-an edit that changes the next query. `tests/baseline.rs` times one fixed sample
+shadowing, a `for` variable's scope, resources, overload refusal, a source
+method hiding a superclass method with the same parameter list, a call that
+does not bind to a class, a missing import, static imports, contradictory
+access, and an edit that changes the next query. `tests/classfile.rs` checks
+`tests/fixtures/classes/Lib.class` (JVMS §4, major 61, minor 0, assembled
+rather than compiled by javac; `assemble_lib` must reproduce those bytes),
+truncated input, a bad magic, a bad constant-pool tag, an unsupported version,
+public versus private and package access, add/remove/replace of a class file,
+a directory of `.class` files, a source type and a class file with the same
+name, two interface fields, a supertype cycle, and `java.lang.Object` only
+after that class file is added. `tests/baseline.rs` times one fixed sample
 in-process. That number is not a comparison with IDEA, and the test count is
 not a coverage proof.
 
@@ -178,11 +232,10 @@ uses the `Cargo.lock` in this directory.
 
 ## Later stages
 
-1. A Rust class-file signature reader, then resolution of types that are not
-   in the source set. Until that exists, external types stay unresolved.
-2. Supertype lookup, then overload selection and generics inference, each with
-   its own tests against the JLS. IntelliJ and jdtls are oracles to compare,
-   not definitions.
+1. Overload selection, first by arity and then by types, including a comparison
+   of a source parameter list with a class-file descriptor once erasure is
+   known. Until then a mixed pair stays `SignatureNotCompared`.
+2. Instantiating `Signature` attributes. They are stored and unused.
 3. Reference search, then one refactoring at a time.
 
 Passing the tests in this crate does not mean those stages are done.

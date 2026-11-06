@@ -88,7 +88,7 @@ fn locals_shadow_fields_and_this_still_sees_the_field() {
 }
 
 #[test]
-fn overloads_stay_unpicked_and_inheritance_is_not_searched() {
+fn overloads_stay_unpicked_and_a_source_superclass_method_is_visible() {
     let src = "class A { void m(int x) {} void m(String s) {} void inherited() {} void f() { m(1); } }\nclass B extends A { void g() { inherited(); } }\n";
     let sources = project(&[("A.java", src)]);
     let call = sources.resolve_at("A.java", at(src, "m(1)"));
@@ -96,7 +96,42 @@ fn overloads_stay_unpicked_and_inheritance_is_not_searched() {
     assert_eq!(call.targets.len(), 2);
     assert!(call.targets.iter().all(|target| target.kind == TargetKind::Method));
     let inherited = sources.resolve_at("A.java", at(src, "inherited();"));
-    assert_eq!(inherited.status, ResolveStatus::Unresolved);
+    assert_eq!(inherited.status, ResolveStatus::Resolved);
+    assert_eq!(inherited.targets.len(), 1);
+    assert_eq!(inherited.targets[0].owner, "A");
+    assert_eq!(inherited.targets[0].name, "inherited");
+}
+
+#[test]
+fn a_same_source_signature_hides_the_superclass_method() {
+    let src = "class A { void m() {} }\nclass B extends A { void m() { m(); } }\n";
+    let sources = project(&[("A.java", src)]);
+    let call = sources.resolve_at("A.java", at(src, "m();"));
+    assert_eq!(call.status, ResolveStatus::Resolved);
+    assert_eq!(call.targets.len(), 1);
+    assert_eq!(call.targets[0].owner, "B");
+}
+
+#[test]
+fn a_call_does_not_fall_through_to_a_class_and_a_for_variable_ends_with_the_loop() {
+    let call = "class Foo {}\nclass C { void m() { Foo(); } }\n";
+    let sources = project(&[("C.java", call)]);
+    assert_eq!(sources.resolve_at("C.java", at(call, "Foo()")).status, ResolveStatus::Unresolved);
+
+    let src = "class C { void m() { for (int i = 0; i < 1; i = i + 1) { int k = i; } int z = i; } }\n";
+    let sources = project(&[("C.java", src)]);
+    let inside = sources.resolve_at("C.java", at(src, "k = i") + 4);
+    assert_eq!(inside.status, ResolveStatus::Resolved);
+    assert_eq!(inside.targets[0].kind, TargetKind::Local);
+    assert_eq!(sources.resolve_at("C.java", at(src, "z = i") + 4).status, ResolveStatus::Unresolved);
+}
+
+#[test]
+fn contradictory_access_flags_are_not_treated_as_public() {
+    let src = "class C { public private int x; void m() { int y = x; } }\n";
+    let sources = project(&[("C.java", src)]);
+    let result = sources.resolve_at("C.java", at(src, "y = x") + 4);
+    assert_eq!(result.status, ResolveStatus::NotDetermined);
 }
 
 #[test]
